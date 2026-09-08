@@ -1,0 +1,5 @@
+when wallets are there in main db: 
+npx ts-node src/scripts/import-private-keys.ts mywallets.txt
+
+when wallets are not in db then for both process
+npx ts-node src/scripts/seed-and-shard.ts mywallets1.txt

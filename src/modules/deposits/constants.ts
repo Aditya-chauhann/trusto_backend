@@ -1,0 +1,1 @@
+export const USER_VISIBLE_DEPOSIT_MIN = 5;
