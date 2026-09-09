@@ -1,7 +1,13 @@
+import * as dns from 'dns';
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AppModule } from './app.module';
+
+// Force Node.js DNS resolution to prioritize IPv4 (fixes ENETUNREACH IPv6 on cloud hosts like Render)
+if (dns.setDefaultResultOrder) {
+  dns.setDefaultResultOrder('ipv4first');
+}
 
 async function bootstrap() {
   // rawBody is required to HMAC-verify the payout-bridge callback signature.

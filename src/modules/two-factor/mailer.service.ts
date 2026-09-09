@@ -44,7 +44,8 @@ export class MailerService implements OnModuleInit {
       port,
       secure: port === 465,
       auth: { user, pass },
-    });
+      family: 4, // Force IPv4 to prevent ENETUNREACH on cloud environments without IPv6 routing
+    } as nodemailer.TransportOptions);
     this.from = from;
     this.transporter
       .verify()
