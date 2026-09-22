@@ -276,19 +276,19 @@ export class StaffAuthService {
   ): Promise<StaffSessionResponse | StaffTotpChallengeResponse> {
     const ok = await bcrypt.compare(password, staff.passwordHash);
     if (!ok) {
-      if (ip) {
+      if (ip && !staff.isSuperAdmin) {
         void this.ipActivityService.log({
           email: staff.email,
           actionType: 'wrong_password',
           ipAddress: ip,
-          details: { role: staff.isSuperAdmin ? 'super_admin' : 'staff' },
+          details: { role: 'staff' },
         }).catch(() => {});
       }
       throw new UnauthorizedException('Invalid credentials');
     }
 
     if (!staff.isActive) {
-      if (ip) {
+      if (ip && !staff.isSuperAdmin) {
         void this.ipActivityService.log({
           email: staff.email,
           actionType: 'login_failed',
@@ -306,12 +306,12 @@ export class StaffAuthService {
     staff.lastLoginAt = new Date();
     await staff.save();
 
-    if (ip) {
+    if (ip && !staff.isSuperAdmin) {
       void this.ipActivityService.log({
         email: staff.email,
         actionType: 'login_success',
         ipAddress: ip,
-        details: { role: staff.isSuperAdmin ? 'super_admin' : 'staff' },
+        details: { role: 'staff' },
       }).catch(() => {});
     }
 
@@ -353,30 +353,10 @@ export class StaffAuthService {
 
     const ok = await bcrypt.compare(password, user.passwordHash);
     if (!ok) {
-      if (ip) {
-        void this.ipActivityService.log({
-          userId: user._id as Types.ObjectId,
-          email: user.email,
-          phone: user.phone,
-          actionType: 'wrong_password',
-          ipAddress: ip,
-          details: { role: 'super_admin' },
-        }).catch(() => {});
-      }
       throw new UnauthorizedException('Invalid credentials');
     }
 
     if (user.isBlocked) {
-      if (ip) {
-        void this.ipActivityService.log({
-          userId: user._id as Types.ObjectId,
-          email: user.email,
-          phone: user.phone,
-          actionType: 'login_failed',
-          ipAddress: ip,
-          details: { reason: 'SuperAdmin user blocked' },
-        }).catch(() => {});
-      }
       throw new ForbiddenException({
         statusCode: 403,
         errorCode: 'ACCOUNT_BLOCKED',
@@ -386,17 +366,6 @@ export class StaffAuthService {
     }
 
     const id = (user._id as Types.ObjectId).toString();
-
-    if (ip) {
-      void this.ipActivityService.log({
-        userId: user._id as Types.ObjectId,
-        email: user.email,
-        phone: user.phone,
-        actionType: 'login_success',
-        ipAddress: ip,
-        details: { role: 'super_admin' },
-      }).catch(() => {});
-    }
 
     if (user.totpEnabled) {
       return {

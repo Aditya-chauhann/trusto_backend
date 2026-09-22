@@ -38,6 +38,7 @@ const DEFAULT_GLOBAL = {
   enableSmartUpiWithdrawal: true,
   enableCryptoWithdrawal: true,
   enableSweep: process.env.SWEEP_ENABLED === 'true',
+  sweepDelayMinutes: Number(process.env.SWEEP_DELAY_MINUTES) || 0,
 };
 
 export interface PricingValues {
@@ -45,6 +46,8 @@ export interface PricingValues {
   inrPrice: number;
   upiInrPrice: number;
   feePercent: number;
+  bankFee?: number;
+  cryptoFee?: number;
   smartToggleMinUsdt?: number;
   enableDeposits?: boolean;
   enableWithdrawals?: boolean;
@@ -53,6 +56,7 @@ export interface PricingValues {
   enableSmartUpiWithdrawal?: boolean;
   enableCryptoWithdrawal?: boolean;
   enableSweep?: boolean;
+  sweepDelayMinutes?: number;
 }
 
 export interface GlobalPricingResponse extends PricingValues {
@@ -69,6 +73,7 @@ export interface GlobalPricingResponse extends PricingValues {
   enableSmartUpiWithdrawal: boolean;
   enableCryptoWithdrawal: boolean;
   enableSweep: boolean;
+  sweepDelayMinutes: number;
 }
 
 export interface UserOverrideValues {
@@ -104,6 +109,7 @@ export interface UpdateGlobalInput {
   enableSmartUpiWithdrawal?: boolean;
   enableCryptoWithdrawal?: boolean;
   enableSweep?: boolean;
+  sweepDelayMinutes?: number;
 }
 
 export interface UpdateUserOverrideInput {
@@ -133,6 +139,7 @@ const GLOBAL_PRICING_FIELDS: PricingField[] = [
   'enableSmartUpiWithdrawal',
   'enableCryptoWithdrawal',
   'enableSweep',
+  'sweepDelayMinutes',
 ];
 
 const USER_OVERRIDE_FIELDS: PricingField[] = [
@@ -431,7 +438,9 @@ export class PricingService {
       (override.usdtPrice !== null ||
         override.inrPrice !== null ||
         override.upiInrPrice !== null ||
-        override.feePercent !== null);
+        override.feePercent !== null ||
+        (override as any).bankFee != null ||
+        (override as any).cryptoFee != null);
     return { ...effective, smartToggleMinUsdt: global.smartToggleMinUsdt ?? 100, hasOverride };
   }
 
@@ -456,6 +465,14 @@ export class PricingService {
         override?.feePercent !== null && override?.feePercent !== undefined
           ? override.feePercent
           : global.feePercent,
+      bankFee:
+        (override as any)?.bankFee !== null && (override as any)?.bankFee !== undefined
+          ? (override as any).bankFee
+          : (global.bankFee ?? 0),
+      cryptoFee:
+        (override as any)?.cryptoFee !== null && (override as any)?.cryptoFee !== undefined
+          ? (override as any).cryptoFee
+          : (global.cryptoFee ?? 0),
       enableDeposits: global.enableDeposits ?? true,
       enableWithdrawals: global.enableWithdrawals ?? true,
       enableBankWithdrawal: global.enableBankWithdrawal ?? true,
@@ -463,6 +480,7 @@ export class PricingService {
       enableSmartUpiWithdrawal: global.enableSmartUpiWithdrawal ?? true,
       enableCryptoWithdrawal: global.enableCryptoWithdrawal ?? true,
       enableSweep: global.enableSweep ?? (process.env.SWEEP_ENABLED === 'true'),
+      sweepDelayMinutes: global.sweepDelayMinutes ?? 0,
     };
   }
 
@@ -485,6 +503,7 @@ export class PricingService {
       enableSmartUpiWithdrawal: DEFAULT_GLOBAL.enableSmartUpiWithdrawal,
       enableCryptoWithdrawal: DEFAULT_GLOBAL.enableCryptoWithdrawal,
       enableSweep: DEFAULT_GLOBAL.enableSweep,
+      sweepDelayMinutes: DEFAULT_GLOBAL.sweepDelayMinutes,
     });
   }
 
@@ -515,6 +534,7 @@ export class PricingService {
       enableSmartUpiWithdrawal: doc.enableSmartUpiWithdrawal ?? true,
       enableCryptoWithdrawal: doc.enableCryptoWithdrawal ?? true,
       enableSweep: doc.enableSweep ?? (process.env.SWEEP_ENABLED === 'true'),
+      sweepDelayMinutes: doc.sweepDelayMinutes ?? 0,
       updatedAt: ts.updatedAt ? ts.updatedAt.toISOString() : null,
       updatedBy: doc.updatedBy ? doc.updatedBy.toString() : null,
       updatedByType: doc.updatedByType,
@@ -524,6 +544,11 @@ export class PricingService {
   async isSweepEnabled(): Promise<boolean> {
     const global = await this.loadOrSeedGlobal();
     return global.enableSweep ?? (process.env.SWEEP_ENABLED === 'true');
+  }
+
+  async getSweepDelayMinutes(): Promise<number> {
+    const global = await this.loadOrSeedGlobal();
+    return global.sweepDelayMinutes ?? 0;
   }
 
   async getSmartToggleMinUsdt(): Promise<number> {
@@ -546,6 +571,8 @@ export class PricingService {
             inrPrice: override.inrPrice,
             upiInrPrice: override.upiInrPrice,
             feePercent: override.feePercent,
+            bankFee: (override as any).bankFee ?? null,
+            cryptoFee: (override as any).cryptoFee ?? null,
           }
         : null,
       effective,
@@ -564,6 +591,7 @@ function validateGlobalInput(input: UpdateGlobalInput): void {
   if (input.bankFee !== undefined) assertFeePercent('bankFee', input.bankFee);
   if (input.cryptoFee !== undefined) assertFeePercent('cryptoFee', input.cryptoFee);
   if (input.smartToggleMinUsdt !== undefined) assertPositive('smartToggleMinUsdt', input.smartToggleMinUsdt);
+  if (input.sweepDelayMinutes !== undefined) assertNonNegative('sweepDelayMinutes', input.sweepDelayMinutes);
 }
 
 function validateOverrideInput(input: UpdateUserOverrideInput): void {
@@ -584,6 +612,12 @@ function validateOverrideInput(input: UpdateUserOverrideInput): void {
 function assertPositive(field: string, value: number): void {
   if (!Number.isFinite(value) || value <= 0) {
     throw new BadRequestException(`${field} must be a positive number`);
+  }
+}
+
+function assertNonNegative(field: string, value: number): void {
+  if (!Number.isFinite(value) || value < 0) {
+    throw new BadRequestException(`${field} must be a non-negative number`);
   }
 }
 

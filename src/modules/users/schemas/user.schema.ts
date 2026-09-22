@@ -38,6 +38,15 @@ export class User {
   @Prop({ required: true, trim: true })
   phone: string;
 
+  @Prop({ type: Date, default: null })
+  phoneUpdatedAt: Date | null;
+
+  @Prop({ type: Types.ObjectId, ref: 'StaffUser', default: null })
+  phoneUpdatedBy: Types.ObjectId | null;
+
+  @Prop({ type: String, default: null })
+  phoneUpdatedByName: string | null;
+
   @Prop({ default: false })
   emailVerified: boolean;
 
@@ -163,7 +172,8 @@ export class User {
   @Prop({ type: Date, default: null })
   loginLockedUntil: Date | null;
 
-  // for forgor password
+  @Prop({ type: Boolean, default: false })
+  mustChangePassword: boolean;
 
   // ---- Super admin console login PIN ----
   // Only meaningful when role === UserRole.SuperAdmin. Distinct from the

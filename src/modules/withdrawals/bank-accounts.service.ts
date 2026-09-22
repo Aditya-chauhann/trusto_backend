@@ -71,21 +71,7 @@ export class BankAccountsService {
     });
     if (existing && !existing.isDeleted) {
       throw new ConflictException(
-        'sorry the id is already been registered please contact support',
-      );
-    }
-
-    // Is this account already owned by another active user?
-    const firstOwnerAccount = await this.bankAccountModel
-      .findOne({
-        accountNumber: dto.accountNumber,
-        userId: { $ne: userObjectId },
-        isDeleted: { $ne: true },
-      });
-
-    if (firstOwnerAccount) {
-      throw new ConflictException(
-        'sorry the id is already been registered please contact support',
+        'You have already saved this bank account to your profile',
       );
     }
 
@@ -129,6 +115,25 @@ export class BankAccountsService {
       isDefault: dto.isDefault ?? count === 0,
     });
     return this.toResponse(created);
+  }
+
+  async checkDuplicate(
+    userId: string,
+    accountNumber: string,
+  ): Promise<{ existsOnAnotherAccount: boolean; count: number }> {
+    if (!accountNumber || accountNumber.trim().length === 0) {
+      return { existsOnAnotherAccount: false, count: 0 };
+    }
+    const userObjectId = new Types.ObjectId(userId);
+    const count = await this.bankAccountModel.countDocuments({
+      accountNumber: accountNumber.trim(),
+      userId: { $ne: userObjectId },
+      isDeleted: { $ne: true },
+    });
+    return {
+      existsOnAnotherAccount: count > 0,
+      count,
+    };
   }
 
   async listForUser(userId: string): Promise<BankAccountResponse[]> {
@@ -444,31 +449,17 @@ export class BankAccountsService {
       throw new NotFoundException('Bank account not found');
     }
 
-    // Is this new account number already owned by another active user?
-    const firstOwnerAccount = await this.bankAccountModel
-      .findOne({
-        _id: { $ne: account._id },
-        accountNumber: dto.accountNumber,
-        userId: { $ne: userObjectId },
-        isDeleted: { $ne: true },
-      });
-
-    if (firstOwnerAccount) {
-      throw new ConflictException(
-        'sorry the id is already been registered please contact support',
-      );
-    }
-
-    // Check if the same user already has ANOTHER active account with the same number
+    // Check if the same user already has ANOTHER active account with the same number and IFSC
     const duplicate = await this.bankAccountModel.findOne({
       _id: { $ne: account._id },
       userId: userObjectId,
       accountNumber: dto.accountNumber,
+      ifscCode: ifsc,
       isDeleted: { $ne: true },
     });
     if (duplicate) {
       throw new ConflictException(
-        'sorry the id is already been registered please contact support',
+        'You already have another bank account saved with this account number and IFSC',
       );
     }
 

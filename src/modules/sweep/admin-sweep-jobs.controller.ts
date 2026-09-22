@@ -31,6 +31,7 @@ export class AdminSweepJobsController {
       sweepTxHash: job.sweepTxHash,
       usdtDestinationAddress: job.usdtDestinationAddress,
       error: job.error,
+      scheduledAt: job.scheduledAt?.toISOString() ?? null,
       lockedAt: job.lockedAt?.toISOString() ?? null,
       completedAt: job.completedAt?.toISOString() ?? null,
       createdAt: (job as unknown as { createdAt?: Date }).createdAt?.toISOString() ?? null,

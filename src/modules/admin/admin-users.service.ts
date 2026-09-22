@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -20,6 +21,10 @@ import { CryptoApisSubscriptionsService } from '../cryptoapis/cryptoapis-subscri
 import { AdjustBalanceDto, AdjustmentType } from './dto/adjust-balance.dto';
 import { Deposit, DepositDocument } from '../deposits/schemas/deposit.schema';
 import { Withdrawal, WithdrawalDocument, WithdrawalMethod, WithdrawalStatus } from '../withdrawals/schemas/withdrawal.schema';
+import { MailerService } from '../two-factor/mailer.service';
+import { DailyLogger } from '../../common/daily-logger';
+import { AdminResetUserPasswordDto } from './dto/reset-user-password.dto';
+import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
 
 export interface ModerationResult {
@@ -48,6 +53,9 @@ export interface AdminUserListItem extends ModerationResult {
   walletAddress: string | null;
   referralCode: string;
   phone: string | null;
+  phoneUpdatedAt?: string | null;
+  phoneUpdatedBy?: string | null;
+  phoneUpdatedByName?: string | null;
   emailVerified: boolean;
   phoneVerified: boolean;
   twoFactorVerified: boolean;
@@ -97,6 +105,7 @@ export class AdminUsersService {
     private readonly smartLiquidation: SmartLiquidationService,
     private readonly sweepQueue: SweepQueueService,
     private readonly cryptoApisSubscriptions: CryptoApisSubscriptionsService,
+    private readonly mailerService: MailerService,
   ) { }
 
   async assignAgent(
@@ -309,6 +318,23 @@ export class AdminUsersService {
   ): Promise<{ message: string; balanceChange: number }> {
     const user = await this.loadTarget(targetId, adminId);
 
+    // Resolve admin name for the alert
+    let adminName = 'Super Admin';
+    if (Types.ObjectId.isValid(adminId)) {
+      const staff = await this.staffUserModel.findById(adminId).select('fullName email isSuperAdmin');
+      if (staff) {
+        adminName = staff.isSuperAdmin ? 'Super Admin' : (staff.fullName || staff.email);
+      } else {
+        const adminUser = await this.userModel.findById(adminId).select('name email role');
+        if (adminUser) {
+          adminName = adminUser.role === UserRole.SuperAdmin ? 'Super Admin' : (adminUser.name || adminUser.email);
+        }
+      }
+    }
+
+    const username = user.serialId || user.email || (user._id ? user._id.toString() : 'Unknown');
+    const name = user.name || 'User';
+
     if (dto.type === AdjustmentType.Credit) {
       const deposit = new this.depositModel({
         transactionId: `ADMIN_${crypto.randomBytes(8).toString('hex')}`,
@@ -327,6 +353,25 @@ export class AdminUsersService {
       //     deposit._id as Types.ObjectId,
       //   );
       // }
+
+      void DailyLogger.transactionAlert({
+        type: 'Deposit',
+        status: 'Confirmed (Admin Credit)',
+        username,
+        name,
+        amount: `${dto.amount} USDT`,
+        ipAddress: 'Admin Console',
+        time: deposit.timestamp || new Date(),
+        destinationOrWallet: deposit.walletAddress,
+        txIdOrRef: deposit.transactionId,
+        extraDetails: {
+          'Source': 'Admin Manual Adjustment',
+          'Credited By': adminName,
+          ...(dto.remark ? { 'Remark': dto.remark } : {}),
+        },
+      }).catch((err) => {
+        DailyLogger.error('Failed to send admin credit transaction alert', err?.stack, 'AdminUsersService');
+      });
 
       return { message: 'Balance credited successfully', balanceChange: dto.amount };
     } else {
@@ -351,6 +396,26 @@ export class AdminUsersService {
         decisionReason: 'Manual debit by Admin',
       });
       await withdrawal.save();
+
+      void DailyLogger.transactionAlert({
+        type: 'Withdrawal',
+        status: 'Paid (Admin Debit)',
+        username,
+        name,
+        amount: `${dto.amount} USDT`,
+        ipAddress: 'Admin Console',
+        time: withdrawal.processedAt || new Date(),
+        destinationOrWallet: user.walletAddress || 'Admin Manual Debit',
+        txIdOrRef: (withdrawal._id as Types.ObjectId).toString(),
+        extraDetails: {
+          'Source': 'Admin Manual Adjustment',
+          'Debited By': adminName,
+          ...(dto.remark ? { 'Remark': dto.remark } : {}),
+        },
+      }).catch((err) => {
+        DailyLogger.error('Failed to send admin debit transaction alert', err?.stack, 'AdminUsersService');
+      });
+
       return { message: 'Balance debited successfully', balanceChange: -dto.amount };
     }
   }
@@ -430,6 +495,9 @@ export class AdminUsersService {
       walletAddress: u.walletAddress,
       referralCode: u.referralCode,
       phone: u.phone ?? null,
+      phoneUpdatedAt: u.phoneUpdatedAt ? u.phoneUpdatedAt.toISOString() : null,
+      phoneUpdatedBy: u.phoneUpdatedBy ? u.phoneUpdatedBy.toString() : null,
+      phoneUpdatedByName: u.phoneUpdatedByName ?? null,
       emailVerified: u.emailVerified,
       phoneVerified: u.phoneVerified,
       twoFactorVerified: u.twoFactorVerified,
@@ -530,5 +598,99 @@ export class AdminUsersService {
       smartUpiSelectionEnabled: !!u.smartUpiSelectionEnabled,
       loginLockedUntil: u.loginLockedUntil ? u.loginLockedUntil.toISOString() : null,
     };
+  }
+
+  async resetUserPassword(
+    targetId: string,
+    dto: AdminResetUserPasswordDto,
+    adminId: string,
+  ): Promise<{ ok: boolean; message: string; email: string; temporaryPassword: string }> {
+    if (!Types.ObjectId.isValid(targetId)) {
+      throw new BadRequestException('Invalid user id');
+    }
+    const user = await this.userModel.findById(targetId);
+    if (!user) throw new NotFoundException('User not found');
+    if (!user.email) {
+      throw new BadRequestException('User does not have a registered email address');
+    }
+
+    const tempPassword =
+      dto.temporaryPassword?.trim() ||
+      `Temp#${crypto.randomInt(100_000, 1_000_000)}`;
+
+    user.passwordHash = await bcrypt.hash(tempPassword, 10);
+    user.mustChangePassword = true;
+    user.loginFailedAttempts = 0;
+    user.loginLockedUntil = null;
+    await user.save();
+
+    DailyLogger.log(
+      `[ADMIN] SuperAdmin (${adminId}) set temporary password for user=${user.email} (userId=${user._id})`,
+      'AdminUsersService',
+    );
+
+    await this.mailerService.sendTemporaryPasswordEmail(user.email, tempPassword, user.name || 'User');
+
+    return {
+      ok: true,
+      message: `Temporary password has been set and sent to ${user.email}`,
+      email: user.email,
+      temporaryPassword: tempPassword,
+    };
+  }
+
+  async updatePhone(
+    targetId: string,
+    phone: string,
+    adminId: string,
+  ): Promise<
+    AdminUserListItem & {
+      assignedAgent: { id: string; fullName: string; email: string } | null;
+    }
+  > {
+    if (!Types.ObjectId.isValid(targetId)) {
+      throw new BadRequestException('Invalid user id');
+    }
+    const user = await this.userModel.findById(targetId);
+    if (!user) throw new NotFoundException('User not found');
+
+    let normalizedPhone = phone.trim();
+    if (/^[6-9]\d{9}$/.test(normalizedPhone)) {
+      normalizedPhone = `+91${normalizedPhone}`;
+    }
+    if (!/^\+91[6-9]\d{9}$/.test(normalizedPhone)) {
+      throw new BadRequestException(
+        'Phone must be a valid 10-digit Indian mobile number in +91XXXXXXXXXX format',
+      );
+    }
+
+    const existing = await this.userModel.findOne({
+      phone: normalizedPhone,
+      _id: { $ne: user._id },
+    });
+    if (existing) {
+      throw new ConflictException('Phone number is already registered with another user');
+    }
+
+    let adminName = 'Super Admin';
+    if (Types.ObjectId.isValid(adminId)) {
+      const staff = await this.staffUserModel.findById(adminId).select('fullName username');
+      if (staff) {
+        adminName = staff.fullName || staff.username;
+      }
+    }
+
+    user.phone = normalizedPhone;
+    user.phoneUpdatedAt = new Date();
+    user.phoneUpdatedBy = new Types.ObjectId(adminId);
+    user.phoneUpdatedByName = adminName;
+    await user.save();
+
+    DailyLogger.log(
+      `[ADMIN] SuperAdmin (${adminId}, ${adminName}) updated phone for user=${user.email} (userId=${user._id}) to ${normalizedPhone}`,
+      'AdminUsersService',
+    );
+
+    return this.getById(targetId);
   }
 }

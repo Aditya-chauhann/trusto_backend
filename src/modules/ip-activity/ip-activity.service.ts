@@ -1,25 +1,109 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, OnModuleInit } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { IpActivity, IpActivityDocument } from './schemas/ip-activity.schema';
-import { User, UserDocument } from '../users/schemas/user.schema';
+import { User, UserDocument, UserRole } from '../users/schemas/user.schema';
+import { StaffUser, StaffUserDocument } from '../staff/schemas/staff-user.schema';
 import { BlockedIp, BlockedIpDocument } from '../ip-block/schemas/blocked-ip.schema';
 import { Alert, AlertDocument, AlertSeverity, AlertType } from '../alerts/schemas/alert.schema';
 import { IpBlockService } from '../ip-block/ip-block.service';
 import { DailyLogger } from '../../common/daily-logger';
 
 @Injectable()
-export class IpActivityService {
+export class IpActivityService implements OnModuleInit {
   constructor(
     @InjectModel(IpActivity.name)
     private readonly ipActivityModel: Model<IpActivityDocument>,
     @InjectModel(User.name)
     private readonly userModel: Model<UserDocument>,
+    @InjectModel(StaffUser.name)
+    private readonly staffUserModel: Model<StaffUserDocument>,
     @InjectModel(BlockedIp.name)
     private readonly blockedModel: Model<BlockedIpDocument>,
     @InjectModel(Alert.name)
     private readonly alertModel: Model<AlertDocument>,
   ) {}
+
+  async onModuleInit() {
+    await this.purgeSuperAdminActivities();
+  }
+
+  async purgeSuperAdminActivities() {
+    try {
+      const [superAdminUsers, superAdminStaff] = await Promise.all([
+        this.userModel.find({ role: UserRole.SuperAdmin }).select('_id email phone'),
+        this.staffUserModel.find({ isSuperAdmin: true }).select('_id email username'),
+      ]);
+
+      const userIds = superAdminUsers.map((u) => u._id);
+      const staffIds = superAdminStaff.map((s) => s._id);
+      const emails = [
+        ...superAdminUsers.map((u) => u.email).filter(Boolean),
+        ...superAdminStaff.map((s) => s.email).filter(Boolean),
+      ];
+
+      const res = await this.ipActivityModel.deleteMany({
+        $or: [
+          { userId: { $in: [...userIds, ...staffIds] } },
+          { email: { $in: emails } },
+          { 'details.role': 'super_admin' },
+          { 'details.role': 'SuperAdmin' },
+          { 'details.identifier': { $in: emails } },
+        ],
+      });
+      if (res.deletedCount > 0) {
+        DailyLogger.log(
+          `[IpActivityService] Purged ${res.deletedCount} historical Super Admin IP activity entries`,
+          'IpActivityService',
+        );
+      }
+    } catch (err) {
+      DailyLogger.error('Failed to purge super admin IP activities', (err as Error)?.stack, 'IpActivityService');
+    }
+  }
+
+  async isSuperAdmin(data: {
+    userId?: Types.ObjectId;
+    email?: string;
+    phone?: string;
+    identifier?: string;
+    details?: Record<string, string>;
+  }): Promise<boolean> {
+    if (data.details?.role === 'super_admin' || data.details?.role === 'SuperAdmin') {
+      return true;
+    }
+
+    const email = (data.email || (data.identifier?.includes('@') ? data.identifier : '')).trim().toLowerCase();
+    const phone = (data.phone || (data.identifier?.startsWith('+') ? data.identifier : '')).trim();
+    const identifier = (data.identifier || '').trim();
+    const userId = data.userId;
+
+    if (userId) {
+      const u = await this.userModel.findById(userId).select('role');
+      if (u && u.role === UserRole.SuperAdmin) return true;
+      const s = await this.staffUserModel.findById(userId).select('isSuperAdmin');
+      if (s && s.isSuperAdmin) return true;
+    }
+
+    if (email) {
+      const u = await this.userModel.findOne({ email }).select('role');
+      if (u && u.role === UserRole.SuperAdmin) return true;
+      const s = await this.staffUserModel.findOne({ email }).select('isSuperAdmin');
+      if (s && s.isSuperAdmin) return true;
+    }
+
+    if (phone) {
+      const u = await this.userModel.findOne({ phone }).select('role');
+      if (u && u.role === UserRole.SuperAdmin) return true;
+    }
+
+    if (identifier) {
+      const s = await this.staffUserModel.findOne({ username: identifier }).select('isSuperAdmin');
+      if (s && s.isSuperAdmin) return true;
+    }
+
+    return false;
+  }
 
   async log(data: {
     userId?: Types.ObjectId;
@@ -28,7 +112,12 @@ export class IpActivityService {
     actionType: string;
     ipAddress: string;
     details?: Record<string, string>;
-  }): Promise<IpActivityDocument> {
+  }): Promise<IpActivityDocument | null> {
+    // Exclude any Super Admin activity completely
+    if (await this.isSuperAdmin(data)) {
+      return null;
+    }
+
     let resolvedIp = data.ipAddress;
     if (
       (!resolvedIp ||
@@ -58,6 +147,14 @@ export class IpActivityService {
     ipAddress: string;
     details?: Record<string, string>;
   }): Promise<{ locked: boolean; lockedUntil?: Date }> {
+    // Never record or freeze IP for Super Admin
+    if (data.user && data.user.role === UserRole.SuperAdmin) {
+      return { locked: false };
+    }
+    if (await this.isSuperAdmin({ userId: data.userId, identifier: data.identifier, details: data.details })) {
+      return { locked: false };
+    }
+
     const { actionType, details } = data;
     let ipAddress = data.ipAddress;
     if (
@@ -84,6 +181,10 @@ export class IpActivityService {
         : await this.userModel.findOne({ email: normalized });
     }
 
+    if (user && user.role === UserRole.SuperAdmin) {
+      return { locked: false };
+    }
+
     // 1. Log the individual wrong attempt into IpActivity
     await this.log({
       userId: user?._id as Types.ObjectId | undefined,
@@ -101,12 +202,11 @@ export class IpActivityService {
     if (user) {
       user.loginFailedAttempts = (user.loginFailedAttempts || 0) + 1;
 
-      if (actionType === 'wrong_captcha') {
-        DailyLogger.security(
-          `[AUTH_ALERT] Failed login attempt (wrong captcha) for: ${user.email || user.phone} (attempt ${user.loginFailedAttempts}/5) from IP: ${ipAddress}`,
-          'IpActivityService',
-        );
-      }
+      const attemptLabel = actionType === 'wrong_captcha' ? 'wrong captcha' : 'wrong password';
+      DailyLogger.security(
+        `[AUTH_ALERT] Failed login attempt (${attemptLabel}) for: ${user.email || user.phone} (attempt ${user.loginFailedAttempts}/5) from IP: ${ipAddress}`,
+        'IpActivityService',
+      );
 
       if (user.loginFailedAttempts >= 5) {
         const lockUntil = new Date(Date.now() + 15 * 60 * 1000);
@@ -255,7 +355,35 @@ export class IpActivityService {
       query.$or = orConditions;
     }
 
-    const [docs, total] = await Promise.all([
+    // Exclude all Super Admin activities from query
+    const [superAdminUsers, superAdminStaff] = await Promise.all([
+      this.userModel.find({ role: UserRole.SuperAdmin }).select('_id email phone'),
+      this.staffUserModel.find({ isSuperAdmin: true }).select('_id email username'),
+    ]);
+
+    const superAdminUserIds = superAdminUsers.map((u) => u._id);
+    const superAdminStaffIds = superAdminStaff.map((s) => s._id);
+    const allSuperAdminIds = [...superAdminUserIds, ...superAdminStaffIds];
+    const allSuperAdminEmails = [
+      ...superAdminUsers.map((u) => u.email).filter(Boolean),
+      ...superAdminStaff.map((s) => s.email).filter(Boolean),
+    ].map((e) => e.toLowerCase());
+
+    const superAdminExclusions: any[] = [
+      { userId: { $nin: allSuperAdminIds } },
+      { email: { $nin: allSuperAdminEmails } },
+      { 'details.role': { $ne: 'super_admin' } },
+      { 'details.role': { $ne: 'SuperAdmin' } },
+      { 'details.identifier': { $nin: allSuperAdminEmails } },
+    ];
+
+    if (query.$and) {
+      query.$and.push(...superAdminExclusions);
+    } else {
+      query.$and = superAdminExclusions;
+    }
+
+    const [docs, total, totalBlockedIps, totalBlockedUsers, totalFrozenIps] = await Promise.all([
       this.ipActivityModel
         .find(query)
         .sort({ createdAt: -1 })
@@ -263,11 +391,23 @@ export class IpActivityService {
         .limit(limit)
         .populate({
           path: 'userId',
-          select: '_id name email phone serialId',
+          select: '_id name email phone serialId isBlocked blockedReason isFrozen frozenReason',
           model: 'User',
         })
         .exec(),
       this.ipActivityModel.countDocuments(query),
+      this.blockedModel.countDocuments({
+        blockedUntil: { $gt: new Date() },
+      }),
+      this.userModel.countDocuments({
+        isBlocked: true,
+      }),
+      this.blockedModel.countDocuments({
+        blockedUntil: {
+          $gt: new Date(),
+          $lte: new Date(Date.now() + 2 * 60 * 60 * 1000),
+        },
+      }),
     ]);
 
     const returnedIps = Array.from(new Set(docs.map(d => d.ipAddress).filter(Boolean)));
@@ -285,7 +425,7 @@ export class IpActivityService {
               { email: { $in: missingEmails } },
               { phone: { $in: missingPhones } },
             ],
-          }).select('_id serialId name email phone')
+          }).select('_id serialId name email phone isBlocked blockedReason isFrozen frozenReason')
         : Promise.resolve([]),
     ]);
 
@@ -314,6 +454,10 @@ export class IpActivityService {
         userName: u ? u.name : null,
         userEmail: u ? u.email : doc.email || null,
         userPhone: u ? u.phone : doc.phone || null,
+        userIsBlocked: u ? Boolean(u.isBlocked) : false,
+        userBlockedReason: u ? u.blockedReason || null : null,
+        userIsFrozen: u ? Boolean(u.isFrozen) : false,
+        userFrozenReason: u ? u.frozenReason || null : null,
         actionType: doc.actionType,
         ipAddress: doc.ipAddress,
         isBlocked: !!block,
@@ -324,7 +468,18 @@ export class IpActivityService {
       };
     });
 
-    return { items, total, page, limit };
+    return {
+      items,
+      total,
+      page,
+      limit,
+      stats: {
+        totalBlockedIps,
+        totalBlockedUsers,
+        totalFrozenIps,
+        totalLogs: total,
+      },
+    };
   }
 
   async blockIp(ip: string, reason?: string, durationHours?: number): Promise<{ ok: true }> {

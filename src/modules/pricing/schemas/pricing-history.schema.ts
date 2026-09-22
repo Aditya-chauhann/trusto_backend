@@ -17,7 +17,8 @@ export type PricingField =
   | 'enableUpiWithdrawal'
   | 'enableSmartUpiWithdrawal'
   | 'enableCryptoWithdrawal'
-  | 'enableSweep';
+  | 'enableSweep'
+  | 'sweepDelayMinutes';
 
 export enum PricingHistoryScope {
   Global = 'global',

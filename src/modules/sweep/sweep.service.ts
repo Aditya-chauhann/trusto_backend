@@ -24,17 +24,27 @@ export class SweepService {
   ) { }
 
   async claimNextJob(): Promise<SweepJobDocument | null> {
-    // TODO: create jobs for all wallets after 10 minutes
     const lockTtlMs = this.config.get<number>('sweep.jobLockTtlMs') ?? 600_000;
     const staleBefore = new Date(Date.now() - lockTtlMs);
+    const now = new Date();
 
     return this.sweepJobModel
       .findOneAndUpdate(
         {
           status: { $in: [SweepJobStatus.Pending, SweepJobStatus.Failed] },
-          $or: [
-            { lockedAt: null },
-            { lockedAt: { $lt: staleBefore } },
+          $and: [
+            {
+              $or: [
+                { scheduledAt: null },
+                { scheduledAt: { $lte: now } },
+              ],
+            },
+            {
+              $or: [
+                { lockedAt: null },
+                { lockedAt: { $lt: staleBefore } },
+              ],
+            },
           ],
         },
         {
@@ -46,6 +56,51 @@ export class SweepService {
         { sort: { createdAt: 1 }, new: true },
       )
       .exec();
+  }
+
+  async sweepAllNow(): Promise<{ count: number }> {
+    const now = new Date();
+    const res = await this.sweepJobModel.updateMany(
+      {
+        status: SweepJobStatus.Pending,
+        scheduledAt: { $gt: now },
+      },
+      {
+        $set: { scheduledAt: now },
+      },
+    );
+    this.logger.log(`Manual sweep-now triggered: fast-tracked ${res.modifiedCount} pending job(s)`);
+    return { count: res.modifiedCount };
+  }
+
+  async sweepWalletNow(walletAddress: string): Promise<SweepJobDocument | null> {
+    const address = walletAddress.trim();
+    const now = new Date();
+    let job = await this.sweepJobModel.findOneAndUpdate(
+      {
+        walletAddress: address,
+        status: { $in: [SweepJobStatus.Pending, SweepJobStatus.Failed] },
+      },
+      {
+        $set: {
+          status: SweepJobStatus.Pending,
+          scheduledAt: now,
+          lockedAt: now,
+        },
+      },
+      { new: true },
+    );
+    if (!job) {
+      job = await this.sweepJobModel.create({
+        walletAddress: address,
+        status: SweepJobStatus.Pending,
+        attempts: 0,
+        maxAttempts: this.config.get<number>('sweep.maxAttempts') ?? 5,
+        scheduledAt: now,
+        lockedAt: now,
+      });
+    }
+    return job;
   }
 
   async processJob(job: SweepJobDocument): Promise<void> {

@@ -58,4 +58,13 @@ export class AuthController {
   me(@CurrentUser() user: unknown) {
     return user;
   }
+
+  @UseGuards(AuthGuard('jwt'))
+  @Post('change-password')
+  changePassword(
+    @CurrentUser() user: { id: string },
+    @Body() dto: { currentPassword?: string; newPassword?: string },
+  ) {
+    return this.authService.changeUserPassword(user.id, dto.currentPassword, dto.newPassword);
+  }
 }

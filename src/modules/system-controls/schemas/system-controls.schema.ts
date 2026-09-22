@@ -38,6 +38,10 @@ export class SystemControls {
 
   @Prop({ type: String, enum: ['user', 'staff'], default: null })
   updatedByType: 'user' | 'staff' | null;
+
+  /** Shared CSV export default column presets across super admins: { [filename: string]: string[] } */
+  @Prop({ type: Object, default: {} })
+  csvExportPresets: Record<string, string[]>;
 }
 
 export const SystemControlsSchema =

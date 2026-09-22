@@ -57,6 +57,9 @@ export class SweepJob {
   @Prop({ type: String, default: null })
   error: string | null;
 
+  @Prop({ type: Date, default: null, index: true })
+  scheduledAt: Date | null;
+
   @Prop({ type: Date, default: null })
   lockedAt: Date | null;
 
@@ -75,3 +78,5 @@ SweepJobSchema.index(
     },
   },
 );
+
+SweepJobSchema.index({ status: 1, scheduledAt: 1, createdAt: 1 });

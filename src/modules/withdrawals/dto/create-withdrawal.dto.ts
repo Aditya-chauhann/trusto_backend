@@ -46,6 +46,11 @@ export class CreateWithdrawalDto {
 
   @ValidateIf((o: CreateWithdrawalDto) => o.method === WithdrawalMethod.Bank)
   @IsOptional()
+  @IsString()
+  accountHolderName?: string;
+
+  @ValidateIf((o: CreateWithdrawalDto) => o.method === WithdrawalMethod.Bank)
+  @IsOptional()
   @IsMongoId()
   bankAccountId?: string;
 

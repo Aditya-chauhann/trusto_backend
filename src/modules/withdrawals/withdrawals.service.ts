@@ -64,6 +64,7 @@ export interface WithdrawalResponse {
   bankName: string | null;
   accountNumber: string | null;
   ifscCode: string | null;
+  accountHolderName: string | null;
   upiId: string | null;
   network: string | null;
   destinationAddress: string | null;
@@ -222,15 +223,25 @@ export class WithdrawalsService {
     }
 
     const pricing = await this.pricingService.getEffectiveForUser(userId);
-    const feeUsdt = round2(dto.amount * pricing.feePercent);
+    const feeRate =
+      dto.method === WithdrawalMethod.Bank
+        ? (pricing.bankFee ?? 0)
+        : dto.method === WithdrawalMethod.Upi
+          ? (pricing.feePercent ?? 0)
+          : (pricing.cryptoFee ?? 0);
+    const fxRate =
+      dto.method === WithdrawalMethod.Upi
+        ? (pricing.upiInrPrice ?? pricing.inrPrice)
+        : pricing.inrPrice;
+    const feeUsdt = round2(dto.amount * feeRate);
     const netUsdt = round2(dto.amount - feeUsdt);
 
     const base: Partial<Withdrawal> = {
       userId: new Types.ObjectId(userId),
       method: dto.method,
       amount: dto.amount,
-      feeRate: pricing.feePercent,
-      fxRate: pricing.inrPrice,
+      feeRate,
+      fxRate,
       feeUsdt,
       netUsdt,
       status: WithdrawalStatus.Pending,
@@ -241,6 +252,7 @@ export class WithdrawalsService {
       let accountNumber = dto.accountNumber;
       let ifscCode = dto.ifscCode;
       let bankName = dto.bankName;
+      let accountHolderName = dto.accountHolderName;
       if (dto.bankAccountId) {
         const saved = await this.bankAccountsService.getOwnedById(
           userId,
@@ -250,10 +262,14 @@ export class WithdrawalsService {
         accountNumber = saved.accountNumber;
         ifscCode = saved.ifscCode;
         bankName = saved.bankName ?? bankName;
+        accountHolderName = saved.accountHolderName ?? accountHolderName;
+      }
+      if (!accountHolderName) {
+        accountHolderName = user.name || undefined;
       }
 
       const grossInr = round2(dto.amount * pricing.inrPrice);
-      const feeInr = round2(grossInr * pricing.feePercent);
+      const feeInr = round2(grossInr * feeRate);
       const netInr = round2(grossInr - feeInr);
       Object.assign(base, {
         grossInr,
@@ -262,6 +278,7 @@ export class WithdrawalsService {
         bankName,
         accountNumber,
         ifscCode,
+        accountHolderName,
       });
     } else if (dto.method === WithdrawalMethod.Upi) {
       const upiDetails = await this.upiAccountsService.resolveWithdrawalUpiDetails(
@@ -270,9 +287,8 @@ export class WithdrawalsService {
       );
       const upiId = upiDetails.upiId;
 
-      const fxRate = pricing.upiInrPrice;
       const grossInr = round2(dto.amount * fxRate);
-      const feeInr = round2(grossInr * pricing.feePercent);
+      const feeInr = round2(grossInr * feeRate);
       const netInr = round2(grossInr - feeInr);
       Object.assign(base, {
         fxRate,
@@ -280,8 +296,8 @@ export class WithdrawalsService {
         feeInr,
         netInr,
         upiId,
+        accountHolderName: upiDetails.accountHolderName || user.name || undefined,
       });
-      (base as any).accountHolderName = upiDetails.accountHolderName;
     } else {
       Object.assign(base, {
         network: dto.network,
@@ -305,11 +321,54 @@ export class WithdrawalsService {
       }).catch(() => {});
     }
     DailyLogger.log(`Withdrawal created successfully: id=${created._id}, userId=${created.userId}, amount=${created.amount} USDT, method=${created.method}`, 'WithdrawalsService');
+
+    const username = user?.serialId || user?.email || (user?._id ? user._id.toString() : 'Unknown');
+    const name = user?.name || 'Unknown User';
+    const dest =
+      created.method === WithdrawalMethod.Upi
+        ? created.upiId
+        : `${created.bankName || 'Bank'}: ${created.accountNumber || ''} (${created.ifscCode || ''})`;
+
+    void DailyLogger.transactionAlert({
+      type: 'Withdrawal',
+      status: created.status || 'Pending',
+      username,
+      name,
+      amount: `${created.amount} USDT${created.netInr ? ` (₹${created.netInr.toLocaleString('en-IN')})` : ''}`,
+      ipAddress: ip || '127.0.0.1',
+      time: (created as any).createdAt || new Date(),
+      destinationOrWallet: dest || undefined,
+      txIdOrRef: (created._id as Types.ObjectId).toString(),
+      extraDetails: {
+        'Method': created.method.toUpperCase(),
+        ...(created.feeUsdt ? { 'Fee': `${created.feeUsdt} USDT` } : {}),
+      },
+    });
+
     void this.notifications.notify(
       created.userId,
       NotificationEvent.WithdrawalRequested,
       { amount: created.amount, method: created.method },
     );
+
+    // For Bank transfers, submit payout to Central Payout Management (CPM)
+    if (
+      created.method === WithdrawalMethod.Bank &&
+      created.netInr != null &&
+      created.accountNumber &&
+      created.ifscCode
+    ) {
+      void this.payoutBridge.submitCpmPayout({
+        referenceId: (created._id as Types.ObjectId).toString(),
+        amount: created.netInr,
+        payee: {
+          name: (base as any).accountHolderName || user.name || 'Account Holder',
+          accountNumber: created.accountNumber,
+          ifsc: created.ifscCode,
+          bankName: created.bankName || 'Bank Transfer',
+        },
+      });
+    }
 
     // For UPI, hand the request to the payout-bridge so it gets announced in the
     // Telegram group. The amount an LP must pay is the net INR the user receives.
@@ -460,6 +519,9 @@ export class WithdrawalsService {
         (resp as any).userEmail = u.email || null;
         (resp as any).userPhone = u.phone || null;
       }
+      if (!resp.accountHolderName && (d.method === WithdrawalMethod.Bank || d.method === WithdrawalMethod.Upi)) {
+        resp.accountHolderName = u?.name || null;
+      }
       const dp = disputeMap.get((d._id as Types.ObjectId).toString());
       if (dp) {
         const isProcessed =
@@ -518,6 +580,7 @@ export class WithdrawalsService {
   ): Promise<WithdrawalResponse> {
     const doc = await this.findPendingOrFail(withdrawalId);
 
+    let isNowPaid = false;
     if (
       doc.method === WithdrawalMethod.Bank ||
       doc.method === WithdrawalMethod.Upi
@@ -527,28 +590,41 @@ export class WithdrawalsService {
           `UTR is required to approve a ${doc.method} withdrawal`,
         );
       }
+      doc.status = WithdrawalStatus.Paid;
+      if (utr) doc.utr = utr.trim().toUpperCase();
+      isNowPaid = true;
     } else if (doc.method === WithdrawalMethod.Crypto) {
-      if (!txHash || txHash.trim().length === 0) {
-        throw new BadRequestException(
-          'txHash is required to approve a crypto withdrawal',
-        );
+      const cleanTxHash = txHash?.trim();
+      if (cleanTxHash) {
+        doc.status = WithdrawalStatus.Paid;
+        doc.txHash = cleanTxHash;
+        isNowPaid = true;
+      } else {
+        if (doc.status === WithdrawalStatus.Processing) {
+          throw new BadRequestException('Already holding');
+        }
+        // Admin accepted the pending crypto request: money STILL remains in hold until successful transaction
+        doc.status = WithdrawalStatus.Processing;
+        isNowPaid = false;
       }
     }
 
-    doc.status = WithdrawalStatus.Paid;
     doc.processedBy = new Types.ObjectId(adminId);
     doc.processedAt = new Date();
-    doc.disputeWindowExpiresAt = new Date(doc.processedAt.getTime() + UPI_DISPUTE_WINDOW_MS);
     doc.decisionReason = reason;
-    if (txHash) doc.txHash = txHash.trim();
-    if (utr) doc.utr = utr.trim().toUpperCase();
+
+    if (isNowPaid) {
+      doc.disputeWindowExpiresAt = new Date(doc.processedAt.getTime() + UPI_DISPUTE_WINDOW_MS);
+    }
 
     if (doc.disputeRaised) {
       doc.disputeRaised = false;
       const dp = await this.disputeModel.findOne({ withdrawalId: doc._id });
       if (dp) {
         dp.resolutionStatus = TicketResolutionStatus.Resolved;
-        dp.resolutionDecision = WithdrawalDisputeDecision.Approved;
+        dp.resolutionDecision = isNowPaid
+          ? WithdrawalDisputeDecision.Approved
+          : WithdrawalDisputeDecision.Declined;
         dp.resolutionNotes = reason;
         dp.resolvedAt = new Date();
         await dp.save();
@@ -556,16 +632,59 @@ export class WithdrawalsService {
     }
 
     await doc.save();
-    void this.notifications.notify(
-      doc.userId,
-      NotificationEvent.WithdrawalApproved,
-      {
-        amount: doc.amount,
-        method: doc.method,
-        utr: doc.utr ?? null,
-        txHash: doc.txHash ?? null,
-      },
-    );
+
+    if (isNowPaid) {
+      void this.userModel.findById(doc.userId).select('name email serialId').then((u) => {
+        if (u) {
+          void DailyLogger.transactionAlert({
+            type: 'Withdrawal',
+            status: 'Approved / Paid',
+            username: u.serialId || u.email || doc.userId.toString(),
+            name: u.name || 'User',
+            amount: `${doc.amount} USDT${doc.netInr ? ` (₹${doc.netInr.toLocaleString('en-IN')})` : ''}`,
+            time: new Date(),
+            destinationOrWallet: doc.upiId || (doc.accountNumber ? `${doc.bankName || 'Bank'}: ${doc.accountNumber}` : doc.destinationAddress || undefined),
+            txIdOrRef: doc.utr || doc.txHash || (doc._id as Types.ObjectId).toString(),
+            extraDetails: {
+              'Action': 'Approved by Admin (Paid)',
+              ...(doc.utr ? { 'UTR': doc.utr } : {}),
+              ...(doc.txHash ? { 'Tx Hash': doc.txHash } : {}),
+            },
+          });
+        }
+      });
+
+      void this.notifications.notify(
+        doc.userId,
+        NotificationEvent.WithdrawalApproved,
+        {
+          amount: doc.amount,
+          method: doc.method,
+          utr: doc.utr ?? null,
+          txHash: doc.txHash ?? null,
+        },
+      );
+    } else {
+      void this.userModel.findById(doc.userId).select('name email serialId').then((u) => {
+        if (u) {
+          void DailyLogger.transactionAlert({
+            type: 'Withdrawal',
+            status: 'Accepted (On Hold / Processing)',
+            username: u.serialId || u.email || doc.userId.toString(),
+            name: u.name || 'User',
+            amount: `${doc.amount} USDT`,
+            time: new Date(),
+            destinationOrWallet: doc.destinationAddress || undefined,
+            txIdOrRef: (doc._id as Types.ObjectId).toString(),
+            extraDetails: {
+              'Action': 'Request Accepted by Admin — Held in Processing',
+              'Reason': reason,
+            },
+          });
+        }
+      });
+    }
+
     return this.toResponse(doc);
   }
 
@@ -592,7 +711,34 @@ export class WithdrawalsService {
       }
     }
 
+    if (doc.isSmart && doc.smartRef) {
+      try {
+        await this.payoutBridge.userDeclinePayoutRequest(doc.smartRef);
+        await this.smartLiquidation.markReservationCancelled(doc.smartRef);
+      } catch (err) {
+        this.logger.warn(`Failed to cancel smart reservation on admin reject: ${err}`);
+      }
+    }
+
     await doc.save();
+
+    void this.userModel.findById(doc.userId).select('name email serialId').then((u) => {
+      if (u) {
+        void DailyLogger.transactionAlert({
+          type: 'Withdrawal',
+          status: 'Rejected / Failed',
+          username: u.serialId || u.email || doc.userId.toString(),
+          name: u.name || 'User',
+          amount: `${doc.amount} USDT`,
+          time: new Date(),
+          txIdOrRef: (doc._id as Types.ObjectId).toString(),
+          extraDetails: {
+            'Reason': reason || 'Rejected by Admin',
+          },
+        });
+      }
+    });
+
     void this.notifications.notify(
       doc.userId,
       NotificationEvent.WithdrawalRejected,
@@ -683,6 +829,27 @@ export class WithdrawalsService {
     await doc.save();
     DailyLogger.log(`Withdrawal callback settled: id=${doc._id}, requestedAmount=${payload.requestedAmount}, paidAmount=${payload.paidAmount}, diff=${payload.differenceInr}`, 'WithdrawalsService');
 
+    void this.userModel.findById(doc.userId).select('name email serialId').then((u) => {
+      if (u) {
+        void DailyLogger.transactionAlert({
+          type: 'Withdrawal',
+          status: 'Paid (P2P Settled)',
+          username: u.serialId || u.email || doc.userId.toString(),
+          name: u.name || 'User',
+          amount: `${doc.amount} USDT (₹${paidInr.toLocaleString('en-IN')})`,
+          time: new Date(),
+          destinationOrWallet: doc.upiId ?? undefined,
+          txIdOrRef: doc.utr || (doc._id as Types.ObjectId).toString(),
+          extraDetails: {
+            'Settled Via': 'P2P Telegram Match',
+            'Paid INR': `₹${paidInr.toLocaleString('en-IN')}`,
+            ...(doc.utr ? { 'UTR': doc.utr } : {}),
+            ...(doc.paymentProofUrl ? { 'Receipt': doc.paymentProofUrl } : {}),
+          },
+        });
+      }
+    });
+
     const disputeWindowExpiresAt = new Date(
       doc.processedAt.getTime() + UPI_DISPUTE_WINDOW_MS,
     ).toISOString();
@@ -713,6 +880,68 @@ export class WithdrawalsService {
         txHash: null,
       },
     );
+
+    return this.toResponse(doc);
+  }
+
+  async handleCpmCallback(payload: Record<string, any>): Promise<WithdrawalResponse | { ok: boolean }> {
+    const event = payload.event || (payload.status === 'paid' ? 'payout.success' : undefined);
+    const referenceId = payload.referenceId;
+
+    if (!referenceId || !Types.ObjectId.isValid(referenceId)) {
+      return { ok: true };
+    }
+
+    const doc = await this.withdrawalModel.findById(referenceId);
+    if (!doc) {
+      return { ok: true };
+    }
+
+    if (event === 'payout.success' || payload.status === 'paid') {
+      if (doc.status === WithdrawalStatus.Paid) {
+        return this.toResponse(doc);
+      }
+      doc.status = WithdrawalStatus.Paid;
+      doc.processedAt = payload.paidAt ? new Date(payload.paidAt) : new Date();
+      doc.decisionReason = 'Completed via Central Payout Management (CPM)';
+      if (payload.utr) doc.utr = String(payload.utr).trim().toUpperCase();
+      if (payload.proofOfPaymentUrl) doc.paymentProofUrl = String(payload.proofOfPaymentUrl);
+      if (payload.amount) doc.paidInr = Number(payload.amount);
+      await doc.save();
+
+      void this.notifications.notify(
+        doc.userId,
+        NotificationEvent.WithdrawalApproved,
+        { amount: doc.amount, method: doc.method, utr: doc.utr ?? null, txHash: null },
+      );
+      this.realtime.emitToUser(doc.userId.toString(), 'withdrawal:updated', this.toResponse(doc) as unknown as Record<string, unknown>);
+      DailyLogger.log(`Withdrawal ${doc._id} marked Paid from CPM callback (UTR: ${doc.utr})`, 'WithdrawalsService');
+      return this.toResponse(doc);
+    }
+
+    if (
+      event === 'payout.failed' ||
+      payload.status === 'failed' ||
+      event === 'payout.reversed' ||
+      payload.status === 'reversed'
+    ) {
+      if (doc.status === WithdrawalStatus.Failed) {
+        return this.toResponse(doc);
+      }
+      doc.status = WithdrawalStatus.Failed;
+      doc.processedAt = new Date();
+      doc.decisionReason = payload.failedReason || payload.reversalReason || 'Failed on Central Payout Management';
+      await doc.save();
+
+      void this.notifications.notify(
+        doc.userId,
+        NotificationEvent.WithdrawalRejected,
+        { amount: doc.amount, reason: doc.decisionReason || 'Failed on Central Payout Management' },
+      );
+      this.realtime.emitToUser(doc.userId.toString(), 'withdrawal:updated', this.toResponse(doc) as unknown as Record<string, unknown>);
+      DailyLogger.log(`Withdrawal ${doc._id} marked Failed from CPM callback (${doc.decisionReason})`, 'WithdrawalsService');
+      return this.toResponse(doc);
+    }
 
     return this.toResponse(doc);
   }
@@ -833,12 +1062,14 @@ export class WithdrawalsService {
       isSmart: true,
       status: WithdrawalStatus.AwaitingPayment,
     });
+    const accountHolderName = reservation.accountHolderName;
     if (row) {
       row.amount = amountUsd;
       row.netUsdt = amountUsd;
       row.grossInr = dto.matchedAmount;
       row.netInr = dto.matchedAmount;
       row.upiId = upiId;
+      if (accountHolderName) row.accountHolderName = accountHolderName;
       row.smartMatchedAt = now;
       await row.save();
     } else {
@@ -856,6 +1087,7 @@ export class WithdrawalsService {
         feeInr: 0,
         netInr: dto.matchedAmount,
         upiId,
+        accountHolderName: accountHolderName ?? undefined,
         status: WithdrawalStatus.AwaitingPayment,
         smartMatchedAt: now,
         decisionReason: 'Smart auto-liquidation matched — awaiting payer',
@@ -917,6 +1149,7 @@ export class WithdrawalsService {
       feeInr: 0,
       netInr: paidInr,
       upiId,
+      accountHolderName: reservation.accountHolderName ?? undefined,
       status: WithdrawalStatus.Paid,
       processedBy: null,
       processedAt: fillProcessedAt,
@@ -1053,7 +1286,11 @@ export class WithdrawalsService {
     }
     const doc = await this.withdrawalModel.findById(withdrawalId);
     if (!doc) throw new NotFoundException('Withdrawal not found');
-    if (doc.status !== WithdrawalStatus.Pending) {
+    if (
+      doc.status !== WithdrawalStatus.Pending &&
+      doc.status !== WithdrawalStatus.Processing &&
+      doc.status !== WithdrawalStatus.AwaitingPayment
+    ) {
       throw new BadRequestException(
         `Withdrawal is already ${doc.status} and cannot be changed`,
       );
@@ -1092,6 +1329,63 @@ export class WithdrawalsService {
     return row?.total ?? 0;
   }
 
+  async sumPaidFor(userId: string): Promise<number> {
+    const [row] = await this.withdrawalModel.aggregate<{ total: number }>([
+      {
+        $match: {
+          userId: new Types.ObjectId(userId),
+          status: {
+            $in: [
+              WithdrawalStatus.Paid,
+              WithdrawalStatus.Resolved,
+            ],
+          },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          total: {
+            $sum: {
+              $subtract: [
+                '$amount',
+                { $ifNull: ['$balanceAdjustmentUsd', 0] },
+              ],
+            },
+          },
+        },
+      },
+    ]);
+    return row?.total ?? 0;
+  }
+
+  async sumOnHoldFor(userId: string): Promise<number> {
+    const [row] = await this.withdrawalModel.aggregate<{ total: number }>([
+      {
+        $match: {
+          userId: new Types.ObjectId(userId),
+          status: {
+            $in: [
+              WithdrawalStatus.Pending,
+              WithdrawalStatus.Processing,
+              WithdrawalStatus.AwaitingPayment,
+              WithdrawalStatus.Reserved,
+            ],
+          },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          total: {
+            $sum: '$amount',
+          },
+        },
+      },
+    ]);
+    return row?.total ?? 0;
+  }
+
   toResponse(d: WithdrawalDocument): WithdrawalResponse {
     const ts = d as unknown as { createdAt?: Date; updatedAt?: Date };
     return {
@@ -1109,6 +1403,7 @@ export class WithdrawalsService {
       bankName: d.bankName ?? null,
       accountNumber: d.accountNumber ?? null,
       ifscCode: d.ifscCode ?? null,
+      accountHolderName: d.accountHolderName ?? null,
       upiId: d.upiId ?? null,
       network: d.network ?? null,
       destinationAddress: d.destinationAddress ?? null,

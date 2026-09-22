@@ -23,6 +23,8 @@ import { ModerationActionDto } from './dto/moderation.dto';
 import { AssignAgentDto } from './dto/assign-agent.dto';
 import { SetReferralDto } from './dto/set-referral.dto';
 import { AdjustBalanceDto } from './dto/adjust-balance.dto';
+import { AdminResetUserPasswordDto } from './dto/reset-user-password.dto';
+import { UpdatePhoneDto } from './dto/update-phone.dto';
 
 function parseBool(value?: string): boolean | undefined {
   if (value === undefined) return undefined;
@@ -144,6 +146,16 @@ export class AdminUsersController {
     return this.admin.setReferral(id, dto.referralCode, current.id);
   }
 
+  @Patch(':id/phone')
+  @UseGuards(SuperAdminGuard)
+  updatePhone(
+    @Param('id') id: string,
+    @Body() dto: UpdatePhoneDto,
+    @CurrentUser() current: { id: string },
+  ) {
+    return this.admin.updatePhone(id, dto.phone, current.id);
+  }
+
   @Post(':id/adjust-balance')
   @UseGuards(SuperAdminGuard)
   adjustBalance(
@@ -171,5 +183,15 @@ export class AdminUsersController {
     @Body() dto: { enabled: boolean },
   ) {
     return this.admin.setSmartUpi(id, dto.enabled ?? false);
+  }
+
+  @Post(':id/reset-password')
+  @UseGuards(SuperAdminGuard)
+  resetPassword(
+    @Param('id') id: string,
+    @Body() dto: AdminResetUserPasswordDto,
+    @CurrentUser() current: { id: string },
+  ) {
+    return this.admin.resetUserPassword(id, dto, current.id);
   }
 }

@@ -33,6 +33,7 @@ import { CreateWithdrawalDisputeDto } from './dto/create-withdrawal-dispute.dto'
 import { NotificationsService } from '../notifications/notifications.service';
 import { NotificationEvent } from '../notifications/notification-events';
 import { PayoutBridgeService } from '../payout-bridge/payout-bridge.service';
+import { DailyLogger } from '../../common/daily-logger';
 
 // Minimal shape of the uploaded PDF (Multer memory file; avoids @types/multer).
 import { User, UserDocument } from '../users/schemas/user.schema';
@@ -117,6 +118,7 @@ export class WithdrawalDisputesService {
     userId: string,
     dto: CreateWithdrawalDisputeDto,
     file?: DisputeUpload,
+    ipAddress?: string,
   ): Promise<WithdrawalDisputeResponse> {
     if (!Types.ObjectId.isValid(userId)) {
       throw new BadRequestException('Invalid user id');
@@ -206,6 +208,35 @@ export class WithdrawalDisputesService {
     dispute.bankStatementUrl = pdfUrl;
     dispute.bankStatementName = file.originalname;
     await dispute.save();
+
+    const user = await this.userModel.findById(userId);
+    const username = user?.serialId || user?.email || (user?._id ? user._id.toString() : 'Unknown');
+    const name = user?.name || 'Unknown User';
+    const dest =
+      withdrawal.method === WithdrawalMethod.Upi
+        ? withdrawal.upiId
+        : withdrawal.accountNumber
+        ? `${withdrawal.bankName || 'Bank'}: ${withdrawal.accountNumber} (${withdrawal.ifscCode || ''})`
+        : withdrawal.destinationAddress;
+
+    void DailyLogger.transactionAlert({
+      type: 'Withdrawal Dispute',
+      status: 'Under Review / Disputed',
+      username,
+      name,
+      amount: `${withdrawal.amount ?? 0} USDT${withdrawal.netInr ? ` (₹${withdrawal.netInr.toLocaleString('en-IN')})` : ''}`,
+      ipAddress: ipAddress || '127.0.0.1',
+      time: (dispute as any).createdAt || new Date(),
+      destinationOrWallet: dest || undefined,
+      txIdOrRef: (withdrawal._id as Types.ObjectId).toString(),
+      extraDetails: {
+        'Dispute ID': (dispute._id as Types.ObjectId).toString(),
+        'Reason': dispute.reason || 'Not Received',
+        'Issue / Description': dispute.description,
+        'Bank Statement': file.originalname || 'Attached PDF',
+        ...(dispute.bankStatementUrl ? { 'Statement URL': dispute.bankStatementUrl } : {}),
+      },
+    });
 
     void this.notifications.notify(
       withdrawal.userId,
@@ -453,6 +484,25 @@ export class WithdrawalDisputesService {
     }
     await doc.save();
 
+    const user = await this.userModel.findById(doc.userId);
+    const username = user?.serialId || user?.email || (user?._id ? user._id.toString() : 'Unknown');
+    const name = user?.name || 'Unknown User';
+    void DailyLogger.transactionAlert({
+      type: 'Withdrawal Dispute',
+      status: 'Approved / Resolved',
+      username,
+      name,
+      amount: `${params.amountUsdt} USDT (${params.direction})`,
+      time: new Date(),
+      txIdOrRef: (withdrawal._id as Types.ObjectId).toString(),
+      extraDetails: {
+        'Dispute ID': (doc._id as Types.ObjectId).toString(),
+        'Decision': `Dispute Approved (${params.direction} ${params.amountUsdt} USDT)`,
+        'Resolved By Admin': viewer.id,
+        ...(params.resolutionNotes ? { 'Notes': params.resolutionNotes } : {}),
+      },
+    });
+
     void this.notifications.notify(doc.userId, NotificationEvent.TicketResolved, {
       ticketId: (doc._id as Types.ObjectId).toString(),
       title: doc.title,
@@ -495,6 +545,25 @@ export class WithdrawalDisputesService {
       doc.resolutionNotes = resolutionNotes.trim() || null;
     }
     await doc.save();
+
+    const user = await this.userModel.findById(doc.userId);
+    const username = user?.serialId || user?.email || (user?._id ? user._id.toString() : 'Unknown');
+    const name = user?.name || 'Unknown User';
+    void DailyLogger.transactionAlert({
+      type: 'Withdrawal Dispute',
+      status: 'Declined / Paid',
+      username,
+      name,
+      amount: `${withdrawal.amount ?? 0} USDT`,
+      time: new Date(),
+      txIdOrRef: (withdrawal._id as Types.ObjectId).toString(),
+      extraDetails: {
+        'Dispute ID': (doc._id as Types.ObjectId).toString(),
+        'Decision': 'Dispute Declined (Transaction restored to Paid)',
+        'Resolved By Admin': viewer.id,
+        ...(resolutionNotes ? { 'Notes': resolutionNotes } : {}),
+      },
+    });
 
     void this.notifications.notify(doc.userId, NotificationEvent.TicketResolved, {
       ticketId: (doc._id as Types.ObjectId).toString(),

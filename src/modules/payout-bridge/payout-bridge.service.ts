@@ -14,22 +14,76 @@ export interface RegisterPayoutRequestInput {
   smart?: boolean;
 }
 
+export interface CpmPayoutInput {
+  referenceId: string;
+  amount: number;
+  currency?: string;
+  payee: {
+    name: string;
+    accountNumber: string;
+    ifsc: string;
+    bankName?: string;
+  };
+}
+
 export interface CancelPayoutRequestResult {
   cancelled: boolean;
   status: string | null;
 }
 
 /**
- * Outbound client: TronPay -> payout-bridge. Registers a payout request so the
- * bridge announces it in Telegram and starts watching for a matching screenshot.
- * Fire-and-forget from the caller's perspective: a bridge outage must never roll
- * back the user's withdrawal.
+ * Outbound client: TronPay -> payout-bridge & Central Payout Management (CPM).
  */
 @Injectable()
 export class PayoutBridgeService {
   private readonly logger = new Logger(PayoutBridgeService.name);
 
   constructor(private readonly config: ConfigService) {}
+
+  async submitCpmPayout(input: CpmPayoutInput): Promise<void> {
+    const baseUrl = this.config.get<string>('payoutBridge.baseUrl');
+    if (!baseUrl) {
+      this.logger.warn('PAYOUT_BRIDGE_URL not set — skipping CPM payout submission');
+      return;
+    }
+    const apiKey = this.config.get<string>('payoutBridge.apiKey') ?? '';
+
+    try {
+      const res = await fetch(`${baseUrl.replace(/\/$/, '')}/v1/payouts`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': apiKey,
+        },
+        body: JSON.stringify({
+          referenceId: input.referenceId,
+          amount: input.amount,
+          currency: input.currency || 'INR',
+          payee: {
+            name: input.payee.name,
+            accountNumber: input.payee.accountNumber,
+            ifsc: input.payee.ifsc,
+            bankName: input.payee.bankName,
+          },
+        }),
+      });
+
+      if (res.status === 409) {
+        this.logger.debug(`CPM already has payout reference ${input.referenceId}`);
+      } else if (!res.ok) {
+        const errText = await res.text().catch(() => '');
+        this.logger.error(`CPM payout submission failed (${res.status}) for ref ${input.referenceId}: ${errText}`);
+        DailyLogger.error(`CPM payout submission failed (${res.status}) for ref ${input.referenceId}: ${errText}`, undefined, 'PayoutBridgeService');
+      } else {
+        const data = (await res.json().catch(() => ({}))) as { payoutId?: string; _id?: string };
+        this.logger.log(`Payout successfully submitted to CPM: ref=${input.referenceId}, amount=${input.amount}`);
+        DailyLogger.log(`Payout successfully submitted to CPM: ref=${input.referenceId}, amount=${input.amount}, cpmId=${data.payoutId || data._id}`, 'PayoutBridgeService');
+      }
+    } catch (err) {
+      this.logger.error('CPM payout submission threw error', err as Error);
+      DailyLogger.error('CPM payout submission threw error', (err as Error).stack, 'PayoutBridgeService');
+    }
+  }
 
   async registerPayoutRequest(
     input: RegisterPayoutRequestInput,
@@ -90,9 +144,9 @@ export class PayoutBridgeService {
     try {
       const fd = new FormData();
       fd.append('referenceId', input.referenceId);
-      fd.append('upiId', input.upiId);
-      fd.append('amount', String(input.amount));
-      fd.append('issue', input.issue);
+      fd.append('upiId', input.upiId || 'N/A');
+      fd.append('amount', String(input.amount ?? 0));
+      fd.append('issue', input.issue || 'Dispute raised by user');
       if (input.disputeId) fd.append('disputeId', input.disputeId);
       fd.append(
         'bankStatement',
@@ -107,10 +161,11 @@ export class PayoutBridgeService {
         body: fd,
       });
       if (!res.ok) {
-        this.logger.error(
-          `payout-bridge dispute forward failed: ${res.status} for ref ${input.referenceId}`,
+        const errText = await res.text().catch(() => '');
+        this.logger.warn(
+          `payout-bridge dispute forward failed: ${res.status} for ref ${input.referenceId} - ${errText}`,
         );
-        DailyLogger.error(`payout-bridge dispute forward failed: ${res.status} for ref ${input.referenceId}`, undefined, 'PayoutBridgeService');
+        DailyLogger.warn(`payout-bridge dispute forward response ${res.status} for ref ${input.referenceId}: ${errText}`, 'PayoutBridgeService');
         return { pdfUrl: null };
       }
       const data = (await res.json()) as { pdfUrl: string | null };
@@ -118,7 +173,7 @@ export class PayoutBridgeService {
       return data;
     } catch (err) {
       this.logger.error('payout-bridge dispute forward threw', err as Error);
-      DailyLogger.error('payout-bridge dispute forward threw', (err as Error).stack, 'PayoutBridgeService');
+      DailyLogger.warn(`payout-bridge dispute forward network error: ${(err as Error).message}`, 'PayoutBridgeService');
       return { pdfUrl: null };
     }
   }

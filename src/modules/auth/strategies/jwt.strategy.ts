@@ -155,7 +155,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       type: 'user',
       permissions: isSuperAdmin ? [SUPERADMIN_PERMISSION] : [],
       isSuperAdmin,
-      mustChangePassword: false,
+      mustChangePassword: Boolean(user.mustChangePassword),
       email: user.email,
       name: user.name,
       walletAddress: user.walletAddress,

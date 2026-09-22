@@ -66,6 +66,8 @@ export class SweepQueueService {
     }
 
     const maxAttempts = this.config.get<number>('sweep.maxAttempts') ?? 5;
+    const delayMinutes = await this.pricingService.getSweepDelayMinutes().catch(() => 0);
+    const scheduledAt = delayMinutes > 0 ? new Date(Date.now() + delayMinutes * 60 * 1000) : null;
 
     try {
       await this.sweepJobModel.create({
@@ -74,8 +76,13 @@ export class SweepQueueService {
         status: SweepJobStatus.Pending,
         attempts: 0,
         maxAttempts,
+        scheduledAt,
       });
-      this.logger.log(`Enqueued sweep job for wallet ${address}`);
+      this.logger.log(
+        `Enqueued sweep job for wallet ${address} (delay: ${delayMinutes}m, scheduledAt: ${
+          scheduledAt ? scheduledAt.toISOString() : 'immediate'
+        })`,
+      );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (message.includes('duplicate key')) {

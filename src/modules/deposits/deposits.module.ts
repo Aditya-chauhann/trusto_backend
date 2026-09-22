@@ -2,6 +2,7 @@ import { forwardRef, Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { User, UserSchema } from '../users/schemas/user.schema';
 import { Deposit, DepositSchema } from './schemas/deposit.schema';
+import { SweepJob, SweepJobSchema } from '../sweep/schemas/sweep-job.schema';
 import { DepositsService } from './deposits.service';
 import { DepositIngestService } from './deposit-ingest.service';
 import { UserDepositsController } from './user-deposits.controller';
@@ -15,6 +16,7 @@ import { SweepModule } from '../sweep/sweep.module';
     MongooseModule.forFeature([
       { name: Deposit.name, schema: DepositSchema },
       { name: User.name, schema: UserSchema },
+      { name: SweepJob.name, schema: SweepJobSchema },
     ]),
     NotificationsModule,
     SweepModule,

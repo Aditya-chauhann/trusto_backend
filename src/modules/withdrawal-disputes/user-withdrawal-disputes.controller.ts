@@ -7,6 +7,7 @@ import {
   ParseIntPipe,
   Post,
   Query,
+  Req,
   UploadedFile,
   UseGuards,
   UseInterceptors,
@@ -39,9 +40,11 @@ export class UserWithdrawalDisputesController {
     @CurrentUser() current: AuthenticatedRequestUser,
     @Body() dto: CreateWithdrawalDisputeDto,
     @UploadedFile() bankStatement: DisputeUpload,
+    @Req() req: any,
   ) {
-    DailyLogger.log(`[SECURITY] File uploaded: userId=${current.id}, filename=${bankStatement?.originalname}, mimetype=${bankStatement?.mimetype}, size=${bankStatement?.size} bytes`, 'UserWithdrawalDisputesController');
-    return this.disputes.createForUser(current.id, dto, bankStatement);
+    const ip = (req?.headers?.['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req?.ip || '127.0.0.1';
+    DailyLogger.log(`[SECURITY] File uploaded: userId=${current.id}, filename=${bankStatement?.originalname}, mimetype=${bankStatement?.mimetype}, size=${bankStatement?.size} bytes, ip=${ip}`, 'UserWithdrawalDisputesController');
+    return this.disputes.createForUser(current.id, dto, bankStatement, ip);
   }
 
   @Get()

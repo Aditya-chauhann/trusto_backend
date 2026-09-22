@@ -31,6 +31,7 @@ import { HealthModule } from './modules/health/health.module';
 import { CaptchaModule } from './modules/captcha/captcha.module';
 import { IpBlockModule } from './modules/ip-block/ip-block.module';
 import { IpActivityModule } from './modules/ip-activity/ip-activity.module';
+import { TelegramBotModule } from './modules/telegram-bot/telegram-bot.module';
 
 
 @Module({
@@ -85,7 +86,7 @@ import { IpActivityModule } from './modules/ip-activity/ip-activity.module';
     AnnouncementsModule,
     SweepModule,
     HealthModule,
+    TelegramBotModule,
   ],
 })
-export class AppModule { }
-// test
+export class AppModule { }

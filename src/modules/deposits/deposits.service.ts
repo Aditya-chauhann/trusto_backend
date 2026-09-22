@@ -8,7 +8,13 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { NotificationEvent } from '../notifications/notification-events';
 import { SmartLiquidationService } from '../withdrawals/smart-liquidation.service';
 import { SweepQueueService } from '../sweep/sweep-queue.service';
+import {
+  SweepJob,
+  SweepJobDocument,
+  SweepJobStatus,
+} from '../sweep/schemas/sweep-job.schema';
 import { IpActivityService } from '../ip-activity/ip-activity.service';
+import { DailyLogger } from '../../common/daily-logger';
 
 export interface IngestEventPayload {
   walletAddress: string;
@@ -41,6 +47,10 @@ export interface AdminDepositItem extends DepositResponse {
   } | null;
   remark: string | null;
   visibleToUser: boolean;
+  sweepStatus: string | null;
+  sweepTxHash: string | null;
+  sweptAt: string | null;
+  sweepScheduledAt: string | null;
 }
 
 export interface IngestResult {
@@ -55,6 +65,8 @@ export class DepositsService {
     private readonly depositModel: Model<DepositDocument>,
     @InjectModel(User.name)
     private readonly userModel: Model<UserDocument>,
+    @InjectModel(SweepJob.name)
+    private readonly sweepJobModel: Model<SweepJobDocument>,
     private readonly notifications: NotificationsService,
     @Inject(forwardRef(() => SmartLiquidationService))
     private readonly smartLiquidation: SmartLiquidationService,
@@ -63,9 +75,14 @@ export class DepositsService {
   ) {}
 
   async recordIngested(event: IngestEventPayload): Promise<IngestResult> {
-    const user = await this.userModel
-      .findOne({ walletAddress: event.walletAddress })
-      .select('_id email phone');
+    const cleanAddress = event.walletAddress?.trim();
+    const user = cleanAddress
+      ? await this.userModel
+          .findOne({
+            walletAddress: { $regex: new RegExp(`^${cleanAddress}$`, 'i') },
+          })
+          .select('_id name email phone serialId walletAddress')
+      : null;
     const userId = user ? (user._id as Types.ObjectId) : null;
 
     const update = await this.depositModel.updateOne(
@@ -74,7 +91,7 @@ export class DepositsService {
         $setOnInsert: {
           transactionId: event.transactionId,
           userId,
-          walletAddress: event.walletAddress,
+          walletAddress: cleanAddress || event.walletAddress,
           amount: event.amount,
           currency: event.currency,
           timestamp: new Date(event.timestamp),
@@ -90,6 +107,23 @@ export class DepositsService {
     })) as DepositDocument;
 
     if (created) {
+      const username = user?.serialId || user?.email || (userId ? userId.toString() : 'Guest / Unregistered');
+      const name = user?.name || 'Unassigned User';
+
+      void DailyLogger.transactionAlert({
+        type: 'Deposit',
+        status: 'Confirmed',
+        username,
+        name,
+        amount: `${deposit.amount} ${deposit.currency || 'USDT'}`,
+        ipAddress: 'On-Chain (Blockchain Network)',
+        time: deposit.timestamp || new Date(),
+        destinationOrWallet: deposit.walletAddress,
+        txIdOrRef: deposit.transactionId,
+      }).catch((err) => {
+        DailyLogger.error('Failed to send on-chain deposit transaction alert', err?.stack, 'DepositsService');
+      });
+
       if (userId) {
         void this.ipActivityService.log({
           userId: userId,
@@ -147,7 +181,7 @@ export class DepositsService {
       ),
     );
 
-    const [usersById, usersByWallet] = await Promise.all([
+    const [usersById, usersByWallet, sweepJobs] = await Promise.all([
       userIds.length > 0
         ? this.userModel
             .find({ _id: { $in: userIds.map((id) => new Types.ObjectId(id)) } })
@@ -158,6 +192,12 @@ export class DepositsService {
             .find({ walletAddress: { $in: walletAddresses } })
             .select('_id name email walletAddress serialId phone')
         : [],
+      walletAddresses.length > 0
+        ? this.sweepJobModel
+            .find({ walletAddress: { $in: walletAddresses } })
+            .sort({ createdAt: -1 })
+            .exec()
+        : Promise.resolve([] as SweepJobDocument[]),
     ]);
 
     const userMap = new Map<string, { id: string; name: string; email: string; walletAddress?: string; serialId?: string; phone?: string | null }>();
@@ -195,6 +235,19 @@ export class DepositsService {
       }
     });
 
+    const jobsByTriggerId = new Map<string, SweepJobDocument>();
+    const jobsByWallet = new Map<string, SweepJobDocument[]>();
+
+    (sweepJobs as SweepJobDocument[]).forEach((job: SweepJobDocument) => {
+      if (job.triggerDepositId) {
+        jobsByTriggerId.set(job.triggerDepositId.toString(), job);
+      }
+      const addr = job.walletAddress.trim().toLowerCase();
+      const list = jobsByWallet.get(addr) ?? [];
+      list.push(job);
+      jobsByWallet.set(addr, list);
+    });
+
     return docs.map((d) => {
       const resp = this.toResponse(d);
       const uid = d.userId ? d.userId.toString() : null;
@@ -206,11 +259,69 @@ export class DepositsService {
       const raw = d.rawPayload as Record<string, unknown> | null;
       const remark = raw && typeof raw.remark === 'string' ? raw.remark : null;
 
+      let sweepStatus: string | null = null;
+      let sweepTxHash: string | null = null;
+      let sweptAt: string | null = null;
+      let sweepScheduledAt: string | null = null;
+
+      if (d.walletAddress === 'MANUAL_ADJUSTMENT' || d.transactionId?.startsWith('MANUAL_')) {
+        sweepStatus = 'manual';
+      } else {
+        const dId = (d._id as Types.ObjectId).toString();
+        const dTime = (d as any).createdAt
+          ? new Date((d as any).createdAt).getTime()
+          : (d.timestamp ? new Date(d.timestamp).getTime() : 0);
+        const wAddress = d.walletAddress ? d.walletAddress.trim().toLowerCase() : '';
+        const walletJobs = jobsByWallet.get(wAddress) ?? [];
+        const triggeredJob = jobsByTriggerId.get(dId);
+
+        if (triggeredJob) {
+          sweepStatus = triggeredJob.status;
+          sweepTxHash = triggeredJob.sweepTxHash ?? null;
+          sweptAt = triggeredJob.completedAt ? triggeredJob.completedAt.toISOString() : null;
+          sweepScheduledAt = triggeredJob.scheduledAt ? triggeredJob.scheduledAt.toISOString() : null;
+        } else {
+          const completedJob = walletJobs.find(
+            (j) =>
+              j.status === SweepJobStatus.Completed &&
+              (!j.completedAt || new Date(j.completedAt).getTime() >= dTime - 60_000),
+          );
+          if (completedJob) {
+            sweepStatus = 'completed';
+            sweepTxHash = completedJob.sweepTxHash ?? null;
+            sweptAt = completedJob.completedAt ? completedJob.completedAt.toISOString() : null;
+          } else {
+            const activeJob = walletJobs.find(
+              (j) =>
+                j.status === SweepJobStatus.Sweeping ||
+                j.status === SweepJobStatus.FundingGas ||
+                j.status === SweepJobStatus.Pending,
+            );
+            if (activeJob) {
+              sweepStatus = activeJob.status;
+              sweepTxHash = activeJob.sweepTxHash ?? null;
+              sweepScheduledAt = activeJob.scheduledAt ? activeJob.scheduledAt.toISOString() : null;
+            } else {
+              const failedJob = walletJobs.find((j) => j.status === SweepJobStatus.Failed);
+              if (failedJob) {
+                sweepStatus = 'failed';
+              } else {
+                sweepStatus = 'pending';
+              }
+            }
+          }
+        }
+      }
+
       return {
         ...resp,
         user: userObj ?? null,
         remark,
         visibleToUser: d.amount > USER_VISIBLE_DEPOSIT_MIN,
+        sweepStatus,
+        sweepTxHash,
+        sweptAt,
+        sweepScheduledAt,
       };
     });
   }

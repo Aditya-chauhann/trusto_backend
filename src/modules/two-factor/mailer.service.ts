@@ -44,8 +44,7 @@ export class MailerService implements OnModuleInit {
       port,
       secure: port === 465,
       auth: { user, pass },
-      family: 4, // Force IPv4 to prevent ENETUNREACH on cloud environments without IPv6 routing
-    } as nodemailer.TransportOptions);
+    });
     this.from = from;
     this.transporter
       .verify()
@@ -195,10 +194,10 @@ export class MailerService implements OnModuleInit {
   async sendTemporaryPasswordEmail(
     to: string,
     tempPass: string,
-    staffName: string,
+    staffName: string = 'User',
   ): Promise<void> {
-    const subject = 'Your TrustO Password Reset Request Approved';
-    const text = `Hello ${staffName},\n\nYour password reset request has been approved by the Administrator.\nYour temporary password is: ${tempPass}\n\nPlease sign in to your staff portal and set a new password on first login.\n\nRegards,\nTrustO Support Team`;
+    const subject = 'Your TrustO Temporary Password';
+    const text = `Hello ${staffName},\n\nYour temporary password is: ${tempPass}\n\nPlease sign in to your TrustO account and set a new password on login.\n\nRegards,\nTrustO Support Team`;
     const html = tempPasswordEmail({ tempPass, staffName });
     return this.sendNotificationEmail(to, subject, text, html);
   }

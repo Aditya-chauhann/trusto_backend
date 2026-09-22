@@ -53,7 +53,9 @@ export class UsersController {
 
     const totalDeposits =
       await this.depositsService.sumUserVisibleDepositsFor(currentUser.id);
-    const locked = await this.withdrawalsService.sumLockedFor(currentUser.id);
+    const paid = await this.withdrawalsService.sumPaidFor(currentUser.id);
+    const onHold = await this.withdrawalsService.sumOnHoldFor(currentUser.id);
+    const locked = round2(paid + onHold);
     const available = round2(Math.max(totalDeposits - locked, 0));
 
     // While Smart auto-liquidation is on, the whole available balance is offered
@@ -81,7 +83,8 @@ export class UsersController {
       balances: {
         ...dashboard.balances,
         totalDeposits: totalDeposits.toFixed(2),
-        totalWithdrawals: locked.toFixed(2),
+        totalWithdrawals: paid.toFixed(2),
+        onHold: onHold.toFixed(2),
         available: available.toFixed(2),
         reserved: reserved.toFixed(2),
         smartEnabled,

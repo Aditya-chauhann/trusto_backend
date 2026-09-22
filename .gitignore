@@ -1,6 +1,6 @@
-# Build Output & Dependencies
-node_modules/
+# Build Output
 dist/
+node_modules/
 
 # TypeScript Build Info & Caches
 *.tsbuildinfo
@@ -13,25 +13,13 @@ tsconfig.tsbuildinfo
 .env.dev
 .env.prod
 .env.*
-!.env.example
 
 # Logs & System
 *.log
-logs/
 .DS_Store
-Thumbs.db
 
-# IDE & Tooling
-.claude/
-.idea/
-.vscode/
-
-# Wallet Data, Private Keys & QR Codes (Strictly Ignored)
-qr/
-wallets*.txt
-mywallets*.txt
-wallets.txt
-wallets-topup.txt
+# Wallet Data & Temp Files
 data/wallets.js
-!data/wallets.example.js
-
+mywallets.txt
+mywallets2.txt
+mywallets*.txt

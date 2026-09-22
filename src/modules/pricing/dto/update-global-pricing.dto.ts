@@ -66,4 +66,9 @@ export class UpdateGlobalPricingDto {
   @IsOptional()
   @IsBoolean()
   enableSweep?: boolean;
+
+  @IsOptional()
+  @IsNumber({ allowInfinity: false, allowNaN: false })
+  @Min(0)
+  sweepDelayMinutes?: number;
 }

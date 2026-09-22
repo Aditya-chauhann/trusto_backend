@@ -2,6 +2,19 @@ import { Logger } from '@nestjs/common';
 import * as fs from 'fs';
 import * as path from 'path';
 
+export interface TransactionAlertPayload {
+  type: 'Deposit' | 'Withdrawal' | 'Withdrawal Dispute' | 'Dispute' | string;
+  status: string;
+  username: string;
+  name: string;
+  ipAddress?: string;
+  time?: string | Date;
+  amount: string | number;
+  destinationOrWallet?: string;
+  txIdOrRef?: string;
+  extraDetails?: Record<string, string | number | null | undefined>;
+}
+
 export class DailyLogger {
   private static logDir = path.join(process.cwd(), 'logs');
   private static logger = new Logger('DailyProcess');
@@ -38,6 +51,71 @@ export class DailyLogger {
     this.sendTelegramAlert('SECURITY', message, context);
   }
 
+  static async transactionAlert(data: TransactionAlertPayload) {
+    const isDispute = data.type.toLowerCase().includes('dispute');
+    const isDeposit = data.type.toLowerCase().includes('deposit');
+    const icon = isDispute ? '⚠️' : isDeposit ? '💰' : '💸';
+    const statusLower = (data.status || '').toLowerCase();
+    const statusIcon = isDispute
+      ? statusLower.includes('approve') || statusLower.includes('resolved')
+        ? '✅'
+        : statusLower.includes('decline') || statusLower.includes('reject')
+        ? '❌'
+        : '⚠️'
+      : statusLower.includes('paid') ||
+        statusLower.includes('confirm') ||
+        statusLower.includes('success') ||
+        statusLower.includes('approve')
+      ? '✅'
+      : statusLower.includes('fail') ||
+        statusLower.includes('reject') ||
+        statusLower.includes('cancel')
+      ? '❌'
+      : '⏳';
+
+    const timestamp = (data.time ? new Date(data.time) : new Date()).toLocaleString('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      dateStyle: 'medium',
+      timeStyle: 'medium',
+    });
+
+    const alertTitle = isDispute ? 'Dispute Alert' : `Transaction Alert — ${this.escapeHtml(data.type)}`;
+
+    let message =
+      `${icon} <b>${alertTitle}</b>\n\n` +
+      `<b>Transaction Type:</b> <code>${this.escapeHtml(data.type)}</code>\n` +
+      `<b>Status:</b> ${statusIcon} <code>${this.escapeHtml(data.status)}</code>\n` +
+      `<b>Username:</b> <code>${this.escapeHtml(data.username || 'Unknown')}</code>\n` +
+      `<b>Name of User:</b> ${this.escapeHtml(data.name || 'Unknown')}\n` +
+      `<b>Amount:</b> <b>${this.escapeHtml(String(data.amount))}</b>\n` +
+      `<b>IP Address:</b> <code>${this.escapeHtml(data.ipAddress || '127.0.0.1')}</code>\n` +
+      `<b>Time (IST):</b> <code>${this.escapeHtml(timestamp)}</code>`;
+
+    if (data.destinationOrWallet) {
+      const label = isDeposit ? 'Wallet Address' : 'Payout Destination';
+      message += `\n<b>${label}:</b> <code>${this.escapeHtml(data.destinationOrWallet)}</code>`;
+    }
+
+    if (data.txIdOrRef) {
+      const label = isDeposit ? 'Tx Hash' : 'Reference / ID';
+      message += `\n<b>${label}:</b> <code>${this.escapeHtml(data.txIdOrRef)}</code>`;
+    }
+
+    if (data.extraDetails) {
+      for (const [k, v] of Object.entries(data.extraDetails)) {
+        if (v != null && String(v).trim() !== '') {
+          message += `\n<b>${this.escapeHtml(k)}:</b> ${this.escapeHtml(String(v))}`;
+        }
+      }
+    }
+
+    this.log(
+      `[TRANSACTION] ${data.type} ${data.status}: user=${data.username} (${data.name}), amount=${data.amount}, ip=${data.ipAddress}`,
+      'TransactionAlert',
+    );
+    await this.sendTransactionTelegramAlert(message);
+  }
+
   private static writeToFile(level: string, message: string, context?: string, trace?: string) {
     try {
       this.ensureDirExists();
@@ -63,38 +141,105 @@ export class DailyLogger {
       .replace(/>/g, '&gt;');
   }
 
-  private static async sendTelegramAlert(level: string, message: string, context?: string, trace?: string) {
-    const token = process.env.TELEGRAM_ALERT_BOT_TOKEN;
-    const chatId = process.env.TELEGRAM_ALERT_CHAT_ID;
+  private static async sendRawTelegramAlert(htmlText: string) {
+    const token = process.env.TELEGRAM_ALERT_BOT_TOKEN?.trim();
+    const chatId = process.env.TELEGRAM_ALERT_CHAT_ID?.trim();
 
     if (!token || !chatId) {
       return;
     }
 
     try {
-      const timestamp = new Date().toISOString();
-      const contextStr = context ? `<b>${this.escapeHtml(context)}</b>` : '<code>System</code>';
-      const levelIcon = level === 'ERROR' ? '🚨' : '🔒';
-      const traceStr = trace ? `\n\n<b>Stack Trace:</b>\n<code>${this.escapeHtml(trace.substring(0, 800))}</code>` : '';
-
-      const text =
-        `${levelIcon} <b>System Alert — ${level}</b>\n` +
-        `<b>Time:</b> <code>${timestamp}</code>\n` +
-        `<b>Module:</b> ${contextStr}\n\n` +
-        `<b>Details:</b>\n${this.escapeHtml(message)}` +
-        traceStr;
-
-      await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           chat_id: chatId,
-          text: text,
+          text: htmlText,
           parse_mode: 'HTML',
         }),
       });
+
+      if (!res.ok) {
+        const errorText = await res.text().catch(() => '');
+        this.logger.error(`Telegram API error (${res.status}): ${errorText}`);
+
+        // If Telegram rejected HTML tags, retry as plain text
+        if (errorText.includes("can't parse entities") || errorText.includes('parse_mode')) {
+          const plainText = htmlText.replace(/<[^>]*>?/gm, '');
+          await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: chatId,
+              text: plainText,
+            }),
+          });
+        }
+      }
     } catch (err) {
-      console.error('DailyLogger failed to send Telegram alert:', err);
+      this.logger.error('DailyLogger failed to send Telegram alert:', err as Error);
     }
+  }
+
+  private static async sendTransactionTelegramAlert(htmlText: string) {
+    const token = process.env.TELEGRAM_TRANSACTION_BOT_TOKEN?.trim();
+    const chatId = process.env.TELEGRAM_TRANSACTION_CHAT_ID?.trim();
+
+    if (!token || !chatId) {
+      return;
+    }
+
+    try {
+      const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text: htmlText,
+          parse_mode: 'HTML',
+        }),
+      });
+
+      if (!res.ok) {
+        const errorText = await res.text().catch(() => '');
+        this.logger.error(`Telegram Transaction API error (${res.status}): ${errorText}`);
+
+        // If Telegram rejected HTML tags, retry as plain text
+        if (errorText.includes("can't parse entities") || errorText.includes('parse_mode')) {
+          const plainText = htmlText.replace(/<[^>]*>?/gm, '');
+          await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: chatId,
+              text: plainText,
+            }),
+          });
+        }
+      }
+    } catch (err) {
+      this.logger.error('DailyLogger failed to send Telegram transaction alert:', err as Error);
+    }
+  }
+
+  private static async sendTelegramAlert(level: string, message: string, context?: string, trace?: string) {
+    const timestamp = new Date().toLocaleString('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      dateStyle: 'medium',
+      timeStyle: 'medium',
+    });
+    const contextStr = context ? `<b>${this.escapeHtml(context)}</b>` : '<code>System</code>';
+    const levelIcon = level === 'ERROR' ? '🚨' : '🔒';
+    const traceStr = trace ? `\n\n<b>Stack Trace:</b>\n<code>${this.escapeHtml(trace.substring(0, 800))}</code>` : '';
+
+    const text =
+      `${levelIcon} <b>System Alert — ${level}</b>\n` +
+      `<b>Time (IST):</b> <code>${timestamp}</code>\n` +
+      `<b>Module:</b> ${contextStr}\n\n` +
+      `<b>Details:</b>\n${this.escapeHtml(message)}` +
+      traceStr;
+
+    await this.sendRawTelegramAlert(text);
   }
 }

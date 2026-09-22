@@ -292,6 +292,7 @@ export class UsersService implements OnModuleInit {
       balances: {
         totalDeposits: '0.00',
         totalWithdrawals: '0.00',
+        onHold: '0.00',
         available: '0.00',
         referralEarnings: '0.00',
         currency: 'USDT',

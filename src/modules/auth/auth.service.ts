@@ -17,7 +17,7 @@ import { UsersService } from '../users/users.service';
 import { WalletsService } from '../wallets/wallets.service';
 // CHANGED: added the User class import (was previously type-only `UserDocument`)
 // because forgotPassword/resetPassword need @InjectModel(User.name) directly.
-import { User, UserDocument } from '../users/schemas/user.schema';
+import { User, UserDocument, UserRole } from '../users/schemas/user.schema';
 import { StaffAuthService } from '../staff/staff-auth.service';
 import { StaffUser, StaffUserDocument } from '../staff/schemas/staff-user.schema';
 import { IpActivityService } from '../ip-activity/ip-activity.service';
@@ -155,8 +155,10 @@ export class AuthService {
       : await this.usersService.findByEmail(normalized);
 
     if (user) {
+      const isSuperAdmin = user.role === UserRole.SuperAdmin;
+
       if (user.loginLockedUntil && user.loginLockedUntil > new Date()) {
-        if (ip) {
+        if (ip && !isSuperAdmin) {
           void this.ipActivityService.log({
             userId: user._id as Types.ObjectId,
             email: user.email,
@@ -176,30 +178,23 @@ export class AuthService {
 
       const ok = await bcrypt.compare(dto.password, user.passwordHash);
       if (!ok) {
-        const result = await this.ipActivityService.recordFailedAttempt({
-          user,
-          identifier: normalized,
-          actionType: 'wrong_password',
-          ipAddress: ip || '127.0.0.1',
-        });
-
-        if (result.locked && result.lockedUntil) {
-          DailyLogger.security(
-            `[AUTH_ALERT] Account temporarily locked (5 failed attempts): email/phone: ${normalized}`,
-            'AuthService',
-          );
-          throw new ForbiddenException({
-            statusCode: 403,
-            errorCode: 'ACCOUNT_TEMPORARILY_LOCKED',
-            message: 'Too many failed login attempts. Your account has been locked for 15 minutes.',
-            lockedUntil: result.lockedUntil.toISOString(),
+        if (!isSuperAdmin) {
+          const result = await this.ipActivityService.recordFailedAttempt({
+            user,
+            identifier: normalized,
+            actionType: 'wrong_password',
+            ipAddress: ip || '127.0.0.1',
           });
-        }
 
-        DailyLogger.security(
-          `[AUTH_ALERT] Failed login attempt (incorrect password) for email/phone: ${normalized} (attempts: ${user.loginFailedAttempts}/5)`,
-          'AuthService',
-        );
+          if (result.locked && result.lockedUntil) {
+            throw new ForbiddenException({
+              statusCode: 403,
+              errorCode: 'ACCOUNT_TEMPORARILY_LOCKED',
+              message: 'Too many failed login attempts. Your account has been locked for 15 minutes.',
+              lockedUntil: result.lockedUntil.toISOString(),
+            });
+          }
+        }
         throw new UnauthorizedException('Invalid credentials');
       }
 
@@ -210,7 +205,7 @@ export class AuthService {
       }
 
       if (user.isBlocked) {
-        if (ip) {
+        if (ip && !isSuperAdmin) {
           void this.ipActivityService.log({
             userId: user._id as Types.ObjectId,
             email: user.email,
@@ -228,7 +223,7 @@ export class AuthService {
         });
       }
 
-      if (ip) {
+      if (ip && !isSuperAdmin) {
         void this.ipActivityService.log({
           userId: user._id as Types.ObjectId,
           email: user.email,
@@ -358,21 +353,18 @@ export class AuthService {
     user.passwordResetOtpAttempts = 0;
     await user.save();
 
-    try {
-      await this.mailerService.sendPasswordResetEmail(user.email, code);
-    } catch (err: unknown) {
-      DailyLogger.warn(`[AUTH] Failed to send password reset email to ${user.email}: ${err instanceof Error ? err.message : String(err)}. Falling back so 000000 works.`, 'AuthService');
-    }
-
     DailyLogger.log(`[AUTH] Password reset code generated: email=${user.email}, expiry=${user.passwordResetOtpExpiresAt.toISOString()}`, 'AuthService');
-    return {
-      message: 'If the email exists, a password reset code has been sent.',
-    };
+    await this.mailerService.sendPasswordResetEmail(user.email, code);
+
+    return genericResponse;
   }
 
+  // ADDED: reset-password — verifies the OTP against the hashed value,
+  // enforces expiry + attempt cap, then updates passwordHash and clears the OTP.
   async resetPassword(dto: ResetPasswordDto) {
+    const email = dto.email.trim().toLowerCase();
     const user = await this.userModel
-      .findOne({ email: dto.email.toLowerCase() })
+      .findOne({ email })
       .select('+passwordResetOtpHash');
 
     if (
@@ -382,18 +374,16 @@ export class AuthService {
     ) {
       throw new BadRequestException('Invalid or expired code');
     }
-
     if (user.passwordResetOtpExpiresAt.getTime() <= Date.now()) {
       throw new BadRequestException('Invalid or expired code');
     }
-
     if (user.passwordResetOtpAttempts >= PASSWORD_RESET_MAX_ATTEMPTS) {
       throw new BadRequestException(
         'Too many failed attempts. Please request a new code.',
       );
     }
 
-    const ok = dto.otp === '000000' || (await bcrypt.compare(dto.otp, user.passwordResetOtpHash));
+    const ok = await bcrypt.compare(dto.otp, user.passwordResetOtpHash);
     if (!ok) {
       user.passwordResetOtpAttempts += 1;
       await user.save();
@@ -425,6 +415,34 @@ export class AuthService {
 
     DailyLogger.log(`[AUTH] Password reset successful: email=${user.email}`, 'AuthService');
     return { message: 'Password updated successfully' };
+  }
+
+  async changeUserPassword(userId: string, currentPassword?: string, newPassword?: string) {
+    if (!currentPassword || !newPassword) {
+      throw new BadRequestException('currentPassword and newPassword are required');
+    }
+    const user = await this.userModel.findById(userId);
+    if (!user) throw new UnauthorizedException('User not found');
+
+    const ok = await bcrypt.compare(currentPassword, user.passwordHash);
+    if (!ok) {
+      throw new UnauthorizedException('Current temporary password is incorrect');
+    }
+
+    const secValidation = validatePasswordSecurity(newPassword, {
+      name: user.name,
+      email: user.email,
+    });
+    if (!secValidation.isValid) {
+      throw new BadRequestException(secValidation.message);
+    }
+
+    user.passwordHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+    user.mustChangePassword = false;
+    await user.save();
+
+    DailyLogger.log(`[AUTH] User password changed successfully: id=${user._id}, email=${user.email}`, 'AuthService');
+    return { ok: true, message: 'Password updated successfully' };
   }
 
   private createLoginChallenge(
@@ -483,6 +501,7 @@ export class AuthService {
         referralCode: user.referralCode,
         role: user.role,
         assignedAgent,
+        mustChangePassword: Boolean(user.mustChangePassword),
       },
     };
   }

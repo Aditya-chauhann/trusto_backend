@@ -52,6 +52,9 @@ export class PricingSettings {
   @Prop({ type: Boolean, default: false })
   enableSweep: boolean;
 
+  @Prop({ type: Number, default: 0, min: 0 })
+  sweepDelayMinutes: number;
+
   @Prop({ type: Types.ObjectId, default: null })
   updatedBy: Types.ObjectId | null;
 

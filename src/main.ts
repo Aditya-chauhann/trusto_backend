@@ -1,13 +1,17 @@
-import * as dns from 'dns';
+import 'dotenv/config';
+import * as dns from 'node:dns';
+
+// Fix for Windows / ISP DNS failing to resolve MongoDB Atlas SRV records (querySrv ECONNREFUSED)
+try {
+  dns.setServers(['8.8.8.8', '8.8.4.4']);
+} catch {
+  // Ignore if not supported in environment
+}
+
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AppModule } from './app.module';
-
-// Force Node.js DNS resolution to prioritize IPv4 (fixes ENETUNREACH IPv6 on cloud hosts like Render)
-if (dns.setDefaultResultOrder) {
-  dns.setDefaultResultOrder('ipv4first');
-}
 
 async function bootstrap() {
   // rawBody is required to HMAC-verify the payout-bridge callback signature.

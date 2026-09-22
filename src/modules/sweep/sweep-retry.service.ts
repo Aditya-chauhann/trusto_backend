@@ -24,7 +24,7 @@ export class SweepRetryService {
   /** Every 15 minutes: unlock stale in-progress jobs and re-queue retriable failures. */
   @Cron('0 */15 * * * *')
   async retryFailedAndStaleJobs(): Promise<void> {
-    if (!this.sweepQueue.isEnabled()) return;
+    if (!(await this.sweepQueue.isEnabled())) return;
 
     const lockTtlMs = this.config.get<number>('sweep.jobLockTtlMs') ?? 600_000;
     const staleBefore = new Date(Date.now() - lockTtlMs);

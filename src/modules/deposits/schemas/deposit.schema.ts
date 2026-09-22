@@ -25,6 +25,15 @@ export class Deposit {
 
   @Prop({ required: true, type: Object })
   rawPayload: Record<string, unknown>;
+
+  @Prop({ type: String, default: null, index: true })
+  sweepStatus: string | null;
+
+  @Prop({ type: String, default: null })
+  sweepTxHash: string | null;
+
+  @Prop({ type: Date, default: null })
+  sweptAt: Date | null;
 }
 
 export const DepositSchema = SchemaFactory.createForClass(Deposit);

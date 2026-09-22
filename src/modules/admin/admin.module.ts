@@ -7,6 +7,7 @@ import { StaffModule } from '../staff/staff.module';
 import { WithdrawalsModule } from '../withdrawals/withdrawals.module';
 import { SweepModule } from '../sweep/sweep.module';
 import { CryptoApisModule } from '../cryptoapis/cryptoapis.module';
+import { TwoFactorModule } from '../two-factor/two-factor.module';
 import { AdminUsersService } from './admin-users.service';
 import { AdminUsersController } from './admin-users.controller';
 
@@ -21,6 +22,7 @@ import { AdminUsersController } from './admin-users.controller';
     WithdrawalsModule,
     SweepModule,
     CryptoApisModule,
+    TwoFactorModule,
   ],
   controllers: [AdminUsersController],
   providers: [AdminUsersService],

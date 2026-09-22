@@ -11,8 +11,12 @@ export class PayoutBridgeCallbackController {
 
   @UseGuards(PayoutBridgeSignatureGuard)
   @Post('callback')
-  async onPaid(@Body() dto: PayoutPaidCallbackDto) {
-    const result = await this.withdrawals.markPaidFromProof(dto);
+  async onPaid(@Body() dto: any) {
+    if (dto.event || (dto.status && !dto.imageUrl)) {
+      const result = await this.withdrawals.handleCpmCallback(dto);
+      return { ok: true, status: (result as any)?.status || 'ok' };
+    }
+    const result = await this.withdrawals.markPaidFromProof(dto as PayoutPaidCallbackDto);
     return { ok: true, status: result.status };
   }
 

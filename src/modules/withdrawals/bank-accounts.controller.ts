@@ -7,6 +7,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
@@ -18,6 +19,14 @@ import { CreateBankAccountDto } from './dto/create-bank-account.dto';
 @UseGuards(AuthGuard('jwt'))
 export class BankAccountsController {
   constructor(private readonly bankAccounts: BankAccountsService) {}
+
+  @Get('check-duplicate')
+  checkDuplicate(
+    @CurrentUser() current: { id: string },
+    @Query('accountNumber') accountNumber: string,
+  ) {
+    return this.bankAccounts.checkDuplicate(current.id, accountNumber);
+  }
 
   @Post()
   create(

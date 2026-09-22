@@ -130,6 +130,50 @@ export class SystemControlsService {
     return this.toResponse(doc);
   }
 
+  async getCsvPresets(): Promise<Record<string, string[]>> {
+    const doc = await this.loadOrSeed();
+    return doc.csvExportPresets || {};
+  }
+
+  async saveCsvPreset(
+    filename: string,
+    columns: string[],
+  ): Promise<Record<string, string[]>> {
+    if (!filename || typeof filename !== 'string') {
+      throw new BadRequestException('Filename is required');
+    }
+    if (!Array.isArray(columns)) {
+      throw new BadRequestException('Columns must be an array of strings');
+    }
+
+    const cleanFilename = filename.trim().toLowerCase();
+    const cleanColumns = columns
+      .filter((c) => typeof c === 'string' && c.trim().length > 0)
+      .map((c) => c.trim());
+
+    const doc = await this.loadOrSeed();
+    const presets = { ...(doc.csvExportPresets || {}) };
+    presets[cleanFilename] = cleanColumns;
+    doc.csvExportPresets = presets;
+    doc.markModified('csvExportPresets');
+    await doc.save();
+    return doc.csvExportPresets;
+  }
+
+  async resetCsvPreset(filename: string): Promise<Record<string, string[]>> {
+    if (!filename || typeof filename !== 'string') {
+      throw new BadRequestException('Filename is required');
+    }
+    const cleanFilename = filename.trim().toLowerCase();
+    const doc = await this.loadOrSeed();
+    const presets = { ...(doc.csvExportPresets || {}) };
+    delete presets[cleanFilename];
+    doc.csvExportPresets = presets;
+    doc.markModified('csvExportPresets');
+    await doc.save();
+    return doc.csvExportPresets;
+  }
+
   private async loadOrSeed(): Promise<SystemControlsDocument> {
     let doc = await this.controlsModel.findOne({ key: SYSTEM_CONTROLS_KEY });
     if (!doc) {
@@ -139,6 +183,7 @@ export class SystemControlsService {
         withdrawalsEnabled: true,
         depositsDisabledReason: '',
         withdrawalsDisabledReason: '',
+        csvExportPresets: {},
       });
     }
     return doc;

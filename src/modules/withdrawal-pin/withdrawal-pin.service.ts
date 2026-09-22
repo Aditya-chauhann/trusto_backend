@@ -197,7 +197,7 @@ export class WithdrawalPinService {
       });
     }
 
-    const ok = dto.otp === '000000' || (await bcrypt.compare(dto.otp, user.pinResetOtpHash));
+    const ok = await bcrypt.compare(dto.otp, user.pinResetOtpHash);
     if (!ok) {
       user.pinResetOtpAttempts += 1;
       await user.save();

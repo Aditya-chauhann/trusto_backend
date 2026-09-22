@@ -69,6 +69,9 @@ export class Withdrawal {
   @Prop()
   ifscCode?: string;
 
+  @Prop({ trim: true })
+  accountHolderName?: string;
+
   @Prop()
   upiId?: string;
 
