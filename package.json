@@ -4,7 +4,7 @@
   "description": "TrustO backend",
   "private": true,
   "scripts": {
-    "prebuild": "rimraf dist tsconfig.tsbuildinfo",
+    "prebuild": "node -e \"try{fs.rmSync('dist',{recursive:true,force:true})}catch(e){} try{fs.unlinkSync('tsconfig.tsbuildinfo')}catch(e){}\"",
     "build": "nest build",
     "start": "node -r ts-node/register/transpile-only -r tsconfig-paths/register src/main.js",
     "start:dev": "nodemon -r ts-node/register/transpile-only -r tsconfig-paths/register src/main.js",
@@ -16,6 +16,7 @@
     "sweep:enqueue-deposits": "ts-node -r tsconfig-paths/register src/scripts/enqueue-all-deposits.ts"
   },
   "dependencies": {
+    "@nestjs/cli": "^10.3.0",
     "@nestjs/common": "^10.3.0",
     "@nestjs/config": "^3.2.0",
     "@nestjs/core": "^10.3.0",
@@ -39,13 +40,16 @@
     "passport-jwt": "^4.0.1",
     "qrcode": "^1.5.4",
     "reflect-metadata": "^0.2.1",
+    "rimraf": "^5.0.5",
     "rxjs": "^7.8.1",
     "socket.io": "^4.8.3",
     "socket.io-client": "^4.8.3",
-    "tronweb": "^6.0.0"
+    "tronweb": "^6.0.0",
+    "ts-node": "^10.9.2",
+    "tsconfig-paths": "^4.2.0",
+    "typescript": "^5.3.3"
   },
   "devDependencies": {
-    "@nestjs/cli": "^10.3.0",
     "@nestjs/schematics": "^10.1.0",
     "@types/bcrypt": "^5.0.2",
     "@types/express": "^4.17.21",
@@ -53,10 +57,6 @@
     "@types/nodemailer": "^8.0.0",
     "@types/passport-jwt": "^4.0.1",
     "@types/qrcode": "^1.5.5",
-    "rimraf": "^5.0.5",
-    "ts-loader": "^9.5.1",
-    "ts-node": "^10.9.2",
-    "tsconfig-paths": "^4.2.0",
-    "typescript": "^5.3.3"
+    "ts-loader": "^9.5.1"
   }
 }
