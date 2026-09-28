@@ -1260,18 +1260,15 @@ export class WithdrawalsService {
     if (!doc.processedAt) {
       throw new BadRequestException('This withdrawal has no payment time on record');
     }
-    const windowClosesAt =
-      doc.processedAt.getTime() + UPI_DISPUTE_WINDOW_MS;
-    if (Date.now() > windowClosesAt) {
-      doc.disputeWindowClosedAt = new Date(windowClosesAt);
-      await doc.save();
-      throw new BadRequestException({
-        statusCode: 400,
-        errorCode: 'DISPUTE_WINDOW_CLOSED',
-        message:
-          'The confirmation window has closed. Raise a support ticket if you still have an issue.',
-      });
-    }
+      // PAUSED CODE (allow confirmation at any time):
+  /*
+  const windowClosesAt =
+    doc.processedAt.getTime() + UPI_DISPUTE_WINDOW_MS;
+  if (Date.now() > windowClosesAt) {
+    ...
+  }
+  */
+
     doc.userConfirmedAt = new Date();
     await doc.save();
     DailyLogger.log(`Withdrawal confirmed by user: id=${doc._id}, userId=${doc.userId}`, 'WithdrawalsService');
